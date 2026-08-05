@@ -26,26 +26,75 @@ jobs:
     name: Build ROM
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
 
     steps:
-      - name: Validate launcher secrets
+      - name: Validate launcher credential
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GH_REPO: ${{ secrets.GH_REPO }}
-          RCLONE_TOKEN_PATH: ${{ secrets.RCLONE_TOKEN_PATH }}
         run: |
           set -euo pipefail
-          missing=0
-          for secret_name in GH_TOKEN GH_REPO RCLONE_TOKEN_PATH TELEGRAM_BOT_TOKEN TELEGRAM_CHANNEL_ID; do
-            if [[ -z "${!secret_name:-}" ]]; then
-              echo "::error::Missing required repository secret: ${secret_name}"
-              missing=1
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing required repository secret: GH_TOKEN"
+            exit 1
+          fi
+
+      - name: Checkout private runtime
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Load central runtime
+        id: runtime
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: "0"
+        run: |
+          set -euo pipefail
+          for runtime_file in projects.env build.env rclone.conf load-build.sh; do
+            if [[ ! -s "runtime/${runtime_file}" ]]; then
+              echo "::error::Central runtime file is missing or empty: ${runtime_file}"
+              exit 1
             fi
           done
-          exit "${missing}"
+          chmod 700 runtime/load-build.sh
+          runtime/load-build.sh lite
+
+      - name: Validate loaded runtime
+        env:
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+        run: |
+          set -euo pipefail
+          required=(
+            ENGINE_REPOSITORY
+            DEADZONE_ENGINE_REPOSITORY
+            TELEGRAM_BOT_TOKEN
+            TELEGRAM_RELEASE_GROUP_ID
+            RCLONE_REMOTE_NAME
+          )
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Central runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+          if [[ "$ENGINE_REPOSITORY" != "$DEADZONE_ENGINE_REPOSITORY" ]]; then
+            echo "::error::Runtime engine output does not match the loaded project map"
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$TELEGRAM_RELEASE_GROUP_ID"
+          printf 'TELEGRAM_CHANNEL_ID=%s\n' "$TELEGRAM_RELEASE_GROUP_ID" >> "$GITHUB_ENV"
+          printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
 
       - name: Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
@@ -68,7 +117,7 @@ jobs:
       - name: Checkout private builder source
         uses: actions/checkout@v4
         with:
-          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          repository: ${{ steps.runtime.outputs.engine_repository }}
           ref: main
           token: ${{ secrets.GH_TOKEN }}
           path: toolbuild
@@ -96,6 +145,52 @@ jobs:
         working-directory: toolbuild
         run: chmod -R u+rwX,go+rX .
 
+      - name: Install central Rclone configuration
+        working-directory: toolbuild
+        env:
+          ENGINE_RCLONE_REMOTE: starxONEDRIVE
+        run: |
+          set -euo pipefail
+          source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
+          target_file="$PWD/rclone.conf"
+          configured_remote="$(sed -n 's/^\[\([^]]\+\)\]$/\1/p' "$source_file" | head -n 1)"
+
+          if [[ -z "$configured_remote" ]]; then
+            echo "::error::Central rclone.conf does not define a remote"
+            exit 1
+          fi
+          if [[ "$configured_remote" != "$RCLONE_REMOTE_NAME" ]]; then
+            echo "::error::Rclone remote metadata does not match rclone.conf"
+            exit 1
+          fi
+
+          install -m 600 "$source_file" "$target_file"
+          if [[ "$configured_remote" != "$ENGINE_RCLONE_REMOTE" ]]; then
+            python3 - "$target_file" "$configured_remote" "$ENGINE_RCLONE_REMOTE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          config_path = Path(sys.argv[1])
+          current_remote = sys.argv[2]
+          engine_remote = sys.argv[3]
+          original = config_path.read_text(encoding="utf-8")
+          current_header = f"[{current_remote}]"
+          engine_header = f"[{engine_remote}]"
+          if current_header not in original:
+              raise SystemExit("configured Rclone remote header was not found")
+          config_path.write_text(
+              original.replace(current_header, engine_header, 1),
+              encoding="utf-8",
+          )
+          PY
+          fi
+
+          chmod 600 "$target_file"
+          if ! rclone listremotes --config "$target_file" | grep -Fxq "${ENGINE_RCLONE_REMOTE}:"; then
+            echo "::error::Rclone configuration is not compatible with uploadROM.sh"
+            exit 1
+          fi
+
       - name: Send start notification
         working-directory: toolbuild
         run: |
@@ -113,12 +208,6 @@ jobs:
         run: |
           set -euo pipefail
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
-
-      - name: Configure Rclone
-        working-directory: toolbuild
-        run: |
-          set -euo pipefail
-          sudo -E bash uploadROM.sh setup "${{ secrets.GH_TOKEN }}" "${{ secrets.GH_REPO }}" "${{ secrets.RCLONE_TOKEN_PATH }}" 2>&1 | tee -a build_action.log
 
       - name: Upload ROM
         working-directory: toolbuild
@@ -144,3 +233,9 @@ jobs:
         working-directory: toolbuild
         run: |
           python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: Remove private runtime files
+        if: always()
+        run: |
+          rm -rf runtime
+          rm -f toolbuild/rclone.conf
