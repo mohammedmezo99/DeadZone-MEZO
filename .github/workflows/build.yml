@@ -81,6 +81,7 @@ jobs:
             TELEGRAM_BOT_TOKEN
             TELEGRAM_RELEASE_GROUP_ID
             RCLONE_REMOTE_NAME
+            RCLONE_UPLOAD_DIR
           )
           for variable_name in "${required[@]}"; do
             if [[ -z "${!variable_name:-}" ]]; then
@@ -147,8 +148,6 @@ jobs:
 
       - name: Install central Rclone configuration
         working-directory: toolbuild
-        env:
-          ENGINE_RCLONE_REMOTE: starxONEDRIVE
         run: |
           set -euo pipefail
           source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
@@ -165,29 +164,8 @@ jobs:
           fi
 
           install -m 600 "$source_file" "$target_file"
-          if [[ "$configured_remote" != "$ENGINE_RCLONE_REMOTE" ]]; then
-            python3 - "$target_file" "$configured_remote" "$ENGINE_RCLONE_REMOTE" <<'PY'
-          from pathlib import Path
-          import sys
-
-          config_path = Path(sys.argv[1])
-          current_remote = sys.argv[2]
-          engine_remote = sys.argv[3]
-          original = config_path.read_text(encoding="utf-8")
-          current_header = f"[{current_remote}]"
-          engine_header = f"[{engine_remote}]"
-          if current_header not in original:
-              raise SystemExit("configured Rclone remote header was not found")
-          config_path.write_text(
-              original.replace(current_header, engine_header, 1),
-              encoding="utf-8",
-          )
-          PY
-          fi
-
-          chmod 600 "$target_file"
-          if ! rclone listremotes --config "$target_file" | grep -Fxq "${ENGINE_RCLONE_REMOTE}:"; then
-            echo "::error::Rclone configuration is not compatible with uploadROM.sh"
+          if ! rclone listremotes --config "$target_file" | grep -Fxq "${RCLONE_REMOTE_NAME}:"; then
+            echo "::error::Rclone configuration is not compatible with the loaded runtime"
             exit 1
           fi
 
