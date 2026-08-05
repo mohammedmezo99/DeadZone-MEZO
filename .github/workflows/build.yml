@@ -1,0 +1,146 @@
+name: DeadZone MEZO ROM Launcher
+
+run-name: DeadZone build by ${{ inputs.builder_name || github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_url:
+        description: ROM download URL
+        required: true
+        type: string
+      builder_name:
+        description: Builder name
+        required: false
+        type: string
+      builder_id:
+        description: Telegram user ID
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ROM
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+
+    steps:
+      - name: Validate launcher secrets
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_REPO: ${{ secrets.GH_REPO }}
+          RCLONE_TOKEN_PATH: ${{ secrets.RCLONE_TOKEN_PATH }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for secret_name in GH_TOKEN GH_REPO RCLONE_TOKEN_PATH TELEGRAM_BOT_TOKEN TELEGRAM_CHANNEL_ID; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "::error::Missing required repository secret: ${secret_name}"
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: Clean unused runner packages
+        run: |
+          set -euo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
+
+      - name: Checkout private builder source
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: toolbuild
+          lfs: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set Cairo timezone
+        run: sudo timedatectl set-timezone Africa/Cairo
+
+      - name: Install OpenJDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install builder dependencies
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          sudo bash setup.sh 2>&1 | tee setup_action.log
+          sudo pip3 install --no-cache-dir requests 2>&1 | tee -a setup_action.log
+
+      - name: Grant builder permissions
+        working-directory: toolbuild
+        run: chmod -R u+rwX,go+rX .
+
+      - name: Send start notification
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: Build ROM
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          sudo -E bash build.sh "${{ inputs.input_url }}" "${{ github.repository }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}" 2>&1 | tee build_action.log
+
+      - name: Pack ROM
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
+
+      - name: Configure Rclone
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          sudo -E bash uploadROM.sh setup "${{ secrets.GH_TOKEN }}" "${{ secrets.GH_REPO }}" "${{ secrets.RCLONE_TOKEN_PATH }}" 2>&1 | tee -a build_action.log
+
+      - name: Upload ROM
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 notify.py upload "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+
+      - name: Send success notification
+        if: success()
+        working-directory: toolbuild
+        run: |
+          python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: Send failure notification
+        if: failure() && hashFiles('toolbuild/notify.py') != ''
+        working-directory: toolbuild
+        run: |
+          python3 notify.py fail "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: Send cancellation notification
+        if: cancelled() && hashFiles('toolbuild/notify.py') != ''
+        working-directory: toolbuild
+        run: |
+          python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
