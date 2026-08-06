@@ -17,6 +17,14 @@ on:
         description: Telegram user ID
         required: false
         type: string
+      request_id:
+        description: DeadZone controlled build request ID
+        required: true
+        type: string
+      callback_url:
+        description: Signed DeadZone build-event endpoint
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,8 +34,34 @@ jobs:
     name: Build ROM
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      DEADZONE_REQUEST_ID: ${{ inputs.request_id }}
+      DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+      DEADZONE_PROJECT: lite
+      DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
+      - name: Validate controlled request
+        shell: python
+        env:
+          INPUT_URL: ${{ inputs.input_url }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+        run: |
+          import os
+          import re
+          from urllib.parse import urlparse
+
+          request_id = os.environ["REQUEST_ID"].strip()
+          if not re.fullmatch(r"lite_[A-Za-z0-9]{8,80}", request_id):
+              raise SystemExit("Invalid DeadZone request ID")
+
+          for name in ("INPUT_URL", "CALLBACK_URL"):
+              value = os.environ[name].strip()
+              parsed = urlparse(value)
+              if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                  raise SystemExit(f"{name} must be a safe HTTPS URL")
+
       - name: Validate launcher credential
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -58,7 +92,7 @@ jobs:
         id: runtime
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          DEADZONE_CONTROLLED_BUILD: "0"
+          DEADZONE_CONTROLLED_BUILD: "1"
         run: |
           set -euo pipefail
           for runtime_file in projects.env build.env rclone.conf load-build.sh; do
@@ -78,8 +112,7 @@ jobs:
           required=(
             ENGINE_REPOSITORY
             DEADZONE_ENGINE_REPOSITORY
-            TELEGRAM_BOT_TOKEN
-            TELEGRAM_RELEASE_GROUP_ID
+            BUILD_PROGRESS_SECRET
             RCLONE_REMOTE_NAME
             RCLONE_UPLOAD_DIR
           )
@@ -93,8 +126,8 @@ jobs:
             echo "::error::Runtime engine output does not match the loaded project map"
             exit 1
           fi
-          printf '::add-mask::%s\n' "$TELEGRAM_RELEASE_GROUP_ID"
-          printf 'TELEGRAM_CHANNEL_ID=%s\n' "$TELEGRAM_RELEASE_GROUP_ID" >> "$GITHUB_ENV"
+          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
 
       - name: Maximize build space
