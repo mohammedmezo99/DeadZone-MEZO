@@ -1,28 +1,28 @@
-name: DeadZone MEZO ROM Launcher
+name: MEZO-Lite
 
-run-name: DeadZone build by ${{ inputs.builder_name || github.actor }}
+run-name: 🚀 MEZO-Lite build by ${{ inputs.builder_name || github.actor }}
 
 on:
   workflow_dispatch:
     inputs:
       input_url:
-        description: ROM download URL
+        description: 📥 ROM download URL
         required: true
         type: string
       builder_name:
-        description: Builder name
+        description: 👤 Builder name
         required: false
         type: string
       builder_id:
-        description: Telegram user ID
+        description: 💬 Telegram user ID
         required: false
         type: string
       request_id:
-        description: DeadZone controlled build request ID
+        description: 🆔 DeadZone controlled build request ID
         required: true
         type: string
       callback_url:
-        description: Signed DeadZone build-event endpoint
+        description: 🔗 Signed DeadZone build-event endpoint
         required: true
         type: string
 
@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ROM
+    name: 🛠️ Build ROM
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -41,7 +41,7 @@ jobs:
       DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
-      - name: Validate controlled request
+      - name: 🧾 Validate controlled request
         shell: python
         env:
           INPUT_URL: ${{ inputs.input_url }}
@@ -62,7 +62,7 @@ jobs:
               if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                   raise SystemExit(f"{name} must be a safe HTTPS URL")
 
-      - name: Validate launcher credential
+      - name: 🔐 Validate launcher credential
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -72,7 +72,7 @@ jobs:
             exit 1
           fi
 
-      - name: Maximize build space
+      - name: 💾 Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
         with:
           swap-size-mb: 1024
@@ -81,7 +81,7 @@ jobs:
           remove-android: "true"
           remove-haskell: "true"
 
-      - name: Clean unused runner packages
+      - name: 🧹 Clean unused runner packages
         run: |
           set -euo pipefail
           docker image prune --all --force || true
@@ -90,7 +90,7 @@ jobs:
           sudo apt-get autoremove --purge -y || true
           sudo apt-get clean
 
-      - name: Checkout private runtime
+      - name: 📥 Checkout private runtime
         uses: actions/checkout@v4
         with:
           repository: mohammedmezo99/DeadZone-File
@@ -106,7 +106,7 @@ jobs:
             load-build.sh
           sparse-checkout-cone-mode: false
 
-      - name: Load central runtime
+      - name: ⚙️ Load central runtime
         id: runtime
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -122,7 +122,7 @@ jobs:
           chmod 700 runtime/load-build.sh
           runtime/load-build.sh lite
 
-      - name: Validate loaded runtime
+      - name: ✅ Validate loaded runtime
         env:
           ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
         run: |
@@ -148,7 +148,7 @@ jobs:
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
 
-      - name: Checkout private builder source
+      - name: 📦 Checkout private builder source
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.runtime.outputs.engine_repository }}
@@ -159,27 +159,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Set Cairo timezone
+      - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
-      - name: Install OpenJDK
+      - name: ☕ Install OpenJDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Install builder dependencies
+      - name: 🧰 Install builder dependencies
         working-directory: toolbuild
         run: |
           set -euo pipefail
           sudo bash setup.sh 2>&1 | tee setup_action.log
           sudo pip3 install --no-cache-dir requests 2>&1 | tee -a setup_action.log
 
-      - name: Grant builder permissions
+      - name: 🔓 Grant builder permissions
         working-directory: toolbuild
         run: chmod -R u+rwX,go+rX .
 
-      - name: Install central Rclone configuration
+      - name: ☁️ Install central Rclone configuration
         working-directory: toolbuild
         run: |
           set -euo pipefail
@@ -203,56 +203,53 @@ jobs:
             exit 1
           fi
 
-          # The section name above is enough to validate the central config wiring.
-          # Do not make the launcher depend on rclone parsing/remote access before
-          # the actual upload stage; uploadROM.sh owns the real transfer check.
           rclone version | head -n 1
           echo "Rclone configuration installed for remote: ${RCLONE_REMOTE_NAME}"
 
-      - name: Send start notification
+      - name: 📣 Send start notification
         working-directory: toolbuild
         run: |
           set -euo pipefail
           python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
-      - name: Build ROM
+      - name: 🚀 Build ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
           sudo -E bash build.sh "${{ inputs.input_url }}" "${{ github.repository }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}" 2>&1 | tee build_action.log
 
-      - name: Pack ROM
+      - name: 📦 Pack ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
-      - name: Upload ROM
+      - name: ⬆️ Upload ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
           python3 notify.py upload "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
           sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
 
-      - name: Send success notification
+      - name: ✅ Send success notification
         if: success()
         working-directory: toolbuild
         run: |
           python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
-      - name: Send failure notification
+      - name: ❌ Send failure notification
         if: failure() && hashFiles('toolbuild/notify.py') != ''
         working-directory: toolbuild
         run: |
           python3 notify.py fail "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
-      - name: Send cancellation notification
+      - name: ⛔ Send cancellation notification
         if: cancelled() && hashFiles('toolbuild/notify.py') != ''
         working-directory: toolbuild
         run: |
           python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
-      - name: Remove private runtime files
+      - name: 🧽 Remove private runtime files
         if: always()
         run: |
           rm -rf runtime
