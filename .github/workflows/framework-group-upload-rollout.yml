@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/framework-group-upload-rollout.yml'
+      - 'tools/generate_framework_group_workflow.py'
 
 permissions:
   contents: write
@@ -18,242 +19,19 @@ jobs:
         with:
           ref: main
 
-      - name: 🧩 Generate Telegram-storage Framework workflow
-        shell: python
-        run: |
-          from pathlib import Path
-          import re
+      - name: 🧩 Generate Framework Telegram workflow
+        run: python3 tools/generate_framework_group_workflow.py
 
-          path = Path('.github/workflows/framework.yml')
-          text = path.read_text(encoding='utf-8')
-          input_expr = '$' + '{{ inputs.telegram_files }}'
-
-          text = text.replace('  queue: max\n', '', 1)
-
-          pattern = re.compile(r'      framework_url:\n.*?      callback_url:', re.S)
-          replacement = '''      telegram_files:
-        description: 📦 Telegram storage message map (JSON)
-        required: true
-        type: string
-      callback_url:'''
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'workflow input block target count={count}')
-
-          pattern = re.compile(
-              r'(      - name: 🧾 Validate Framework request\n        shell: python\n)        env:\n.*?(        run: \|\n)',
-              re.S,
-          )
-          replacement = (
-              r'\1'
-              + '        env:\n'
-              + f'          TELEGRAM_FILES: {input_expr}\n'
-              + r'\2'
-          )
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'validation env target count={count}')
-
-          text = text.replace(
-              '          import os\n          import re\n',
-              '          import json\n          import os\n          import re\n',
-              1,
-          )
-
-          pattern = re.compile(
-              r'          urls = \{.*?          if missing:\n              raise SystemExit\("Missing required Framework inputs: " \+ ", "\.join\(missing\)\)\n',
-              re.S,
-          )
-          replacement = '''          try:
-              telegram_files = json.loads(os.environ.get("TELEGRAM_FILES", "{}"))
-          except json.JSONDecodeError as exc:
-              raise SystemExit(f"Invalid telegram_files JSON: {exc}")
-          if not isinstance(telegram_files, dict):
-              raise SystemExit("telegram_files must be a JSON object")
-          allowed_keys = {"framework_url", "services_url", "miui_services_url", "miui_framework_url"}
-          unknown = sorted(set(telegram_files) - allowed_keys)
-          if unknown:
-              raise SystemExit("Unknown Telegram Framework inputs: " + ", ".join(unknown))
-          for key, value in telegram_files.items():
-              if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                  raise SystemExit(f"Invalid Telegram message ID for {key}")
-
-          required = set()
-          for feature in features:
-              if feature == "disable_signature_verification":
-                  required |= {"framework_url", "services_url", "miui_services_url"}
-              elif feature == "cn_notification_fix":
-                  required.add("miui_services_url")
-              elif feature == "disable_secure_flag":
-                  required |= {"services_url", "miui_services_url"}
-              elif feature == "kaorios_toolbox":
-                  required.add("framework_url")
-              elif feature == "add_gboard":
-                  required |= {"miui_services_url", "miui_framework_url"}
-          missing = sorted(key for key in required if key not in telegram_files)
-          if missing:
-              raise SystemExit("Missing required Telegram Framework inputs: " + ", ".join(missing))
-'''
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'input validation body target count={count}')
-
-          text = text.replace(
-              '            load-build.sh\n',
-              '            load-build.sh\n            bot.env\n',
-              1,
-          )
-          text = text.replace(
-              '          for runtime_file in projects.env build.env rclone.conf load-build.sh; do',
-              '          for runtime_file in projects.env build.env rclone.conf load-build.sh bot.env; do',
-              1,
-          )
-
-          marker = '          runtime/load-build.sh framework\n\n'
-          if marker not in text:
-              raise SystemExit('runtime loader marker not found')
-          runtime_extract = '''          runtime/load-build.sh framework
-
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          wanted = {"TELEGRAM_BOT_TOKEN", "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "CLOUD_CHANNEL_ID"}
-          values = {}
-          for raw in Path("runtime/bot.env").read_text(encoding="utf-8").splitlines():
-              line = raw.strip()
-              if not line or line.startswith("#") or "=" not in line:
-                  continue
-              key, value = line.split("=", 1)
-              if key in wanted:
-                  values[key] = value.strip().strip('"').strip("'")
-          missing = sorted(wanted - values.keys())
-          if missing:
-              raise SystemExit("Missing central Telegram runtime values: " + ", ".join(missing))
-          if not values["TELEGRAM_API_ID"].isdigit():
-              raise SystemExit("Invalid TELEGRAM_API_ID")
-          channel = values["CLOUD_CHANNEL_ID"]
-          if not channel.lstrip("-").isdigit() or int(channel) >= 0:
-              raise SystemExit("Invalid CLOUD_CHANNEL_ID")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-              for key, value in values.items():
-                  print(f"::add-mask::{value}")
-                  output.write(f"{key}={value}\\n")
-          PY
-
-'''
-          text = text.replace(marker, runtime_extract, 1)
-
-          text = text.replace(
-              '          required=(DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN BUILD_PROGRESS_SECRET RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR RCLONE_CONFIG_BASE64)',
-              '          required=(DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN BUILD_PROGRESS_SECRET RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR RCLONE_CONFIG_BASE64 TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID)',
-              1,
-          )
-
-          text = text.replace(
-              '          python3 -m pip install --user --break-system-packages "gdown==5.2.0"',
-              '          python3 -m pip install --user --break-system-packages "gdown==5.2.0" "telethon==1.44.0"',
-              1,
-          )
-
-          pattern = re.compile(
-              r'      - name: ⬇️ Download required Framework JARs\n.*?(?=      - name: 🚀 Run FrameworkPatcher engine\n)',
-              re.S,
-          )
-          replacement = f'''      - name: 📥 Download Framework JARs from private Telegram storage
-        working-directory: engine
-        env:
-          TELEGRAM_FILES: {input_expr}
+      - name: ✅ Validate generated candidate
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
-          import asyncio
-          import json
-          import os
-          import pathlib
-          import zipfile
-
-          from telethon import TelegramClient
-          from telethon.sessions import StringSession
-
-          message_map = json.loads(os.environ["TELEGRAM_FILES"])
-          api_id = int(os.environ["TELEGRAM_API_ID"])
-          api_hash = os.environ["TELEGRAM_API_HASH"]
-          bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-          storage_chat_id = int(os.environ["CLOUD_CHANNEL_ID"])
-          inputs = {{
-              "framework.jar": "framework_url",
-              "services.jar": "services_url",
-              "miui-services.jar": "miui_services_url",
-              "miui-framework.jar": "miui_framework_url",
-          }}
-
-          async def main():
-              client = TelegramClient(StringSession(), api_id, api_hash)
-              await client.start(bot_token=bot_token)
-              try:
-                  entity = None
-                  async for dialog in client.iter_dialogs():
-                      if dialog.id == storage_chat_id:
-                          entity = dialog.entity
-                          break
-                  if entity is None:
-                      raise RuntimeError("DeadZone Telegram storage channel is unavailable to the bot")
-
-                  downloaded_ids = []
-                  targets = []
-                  for name, key in inputs.items():
-                      message_id = message_map.get(key)
-                      if not message_id:
-                          continue
-                      message = await client.get_messages(entity, ids=int(message_id))
-                      if message is None or message.document is None:
-                          raise RuntimeError(f"Telegram storage message is not a document: {{name}}")
-                      target = pathlib.Path(name)
-                      result = await client.download_media(message, file=str(target))
-                      if not result or not target.is_file():
-                          raise RuntimeError(f"Telegram download failed: {{name}}")
-                      downloaded_ids.append(int(message_id))
-                      targets.append(target)
-
-                  for target in targets:
-                      size = target.stat().st_size
-                      if size < 1_500_000 or size > 120 * 1024 * 1024 or not zipfile.is_zipfile(target):
-                          raise RuntimeError(f"Invalid JAR input: {{target.name}}")
-                      print(f"✅ {{target.name}} validated ({{size}} bytes)")
-
-                  if downloaded_ids:
-                      await client.delete_messages(entity, downloaded_ids)
-              finally:
-                  await client.disconnect()
-
-          asyncio.run(main())
-          PY
-          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 32 "Framework JAR inputs verified from Telegram storage." || true
-
-'''
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'Telegram download step target count={count}')
-
-          if input_expr not in text:
-              raise SystemExit('literal workflow input expression was not preserved')
-          if 'queue: max' in text:
-              raise SystemExit('invalid queue key still present')
-          if 'framework_url:\n        description:' in text:
-              raise SystemExit('legacy URL inputs still present')
-
-          Path('framework.generated.yml').write_text(text, encoding='utf-8')
-
-      - name: ✅ Validate generated workflow
-        run: |
-          set -Eeuo pipefail
+          test -s framework.generated.yml
           grep -q 'telegram_files:' framework.generated.yml
           grep -q 'telethon==1.44.0' framework.generated.yml
           grep -q 'Download Framework JARs from private Telegram storage' framework.generated.yml
           ! grep -q 'queue: max' framework.generated.yml
 
-      - name: 💾 Publish generated workflow candidate
+      - name: 💾 Publish generated candidate
         run: |
           set -Eeuo pipefail
           git config user.name "github-actions[bot]"
