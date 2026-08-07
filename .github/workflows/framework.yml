@@ -201,20 +201,14 @@ jobs:
           [[ "$CLOUD_CHANNEL_ID" =~ ^-[0-9]+$ ]] || { echo "::error::Invalid CLOUD_CHANNEL_ID"; exit 1; }
 
           for key in BUILD_PROGRESS_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID; do
-            printf '::add-mask::%s
-' "${!key}"
+            echo "::add-mask::${!key}"
           done
           {
-            printf 'TELEGRAM_BOT_TOKEN=%s
-' "$TELEGRAM_BOT_TOKEN"
-            printf 'TELEGRAM_API_ID=%s
-' "$TELEGRAM_API_ID"
-            printf 'TELEGRAM_API_HASH=%s
-' "$TELEGRAM_API_HASH"
-            printf 'CLOUD_CHANNEL_ID=%s
-' "$CLOUD_CHANNEL_ID"
-            printf 'DZ_EVENT_SECRET=%s
-' "$BUILD_PROGRESS_SECRET"
+            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+            echo "TELEGRAM_API_ID=$TELEGRAM_API_ID"
+            echo "TELEGRAM_API_HASH=$TELEGRAM_API_HASH"
+            echo "CLOUD_CHANNEL_ID=$CLOUD_CHANNEL_ID"
+            echo "DZ_EVENT_SECRET=$BUILD_PROGRESS_SECRET"
           } >> "$GITHUB_ENV"
 
       - name: 📡 Prepare signed DeadZone events
