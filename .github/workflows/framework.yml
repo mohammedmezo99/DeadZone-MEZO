@@ -4,7 +4,7 @@ run-name: 🧩 DeadZone-Framework | API ${{ inputs.api_level }} | ${{ inputs.dev
 
 concurrency:
   group: deadzone-framework-build-queue
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
@@ -62,7 +62,7 @@ permissions:
 
 jobs:
   patch:
-    name: 🧩 Patch Android Framework
+    name: 🧩 Build DeadZone Framework
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -77,7 +77,7 @@ jobs:
             exit 1
           fi
 
-      - name: 🧾 Validate request
+      - name: 🧾 Validate build request
         shell: python
         env:
           API_LEVEL: ${{ inputs.api_level }}
@@ -87,51 +87,57 @@ jobs:
         run: |
           import os
 
-          api = os.environ['API_LEVEL'].strip()
-          if api not in {'33', '34', '35', '36'}:
-              raise SystemExit('Supported API levels are 33, 34, 35, and 36')
+          api = os.environ["API_LEVEL"].strip()
+          if api not in {"33", "34", "35", "36"}:
+              raise SystemExit("Supported API levels are 33, 34, 35, and 36")
 
-          for name in ('DEVICE_NAME', 'VERSION_NAME'):
+          for name in ("DEVICE_NAME", "VERSION_NAME"):
               if not os.environ[name].strip():
-                  raise SystemExit(f'{name} is required')
+                  raise SystemExit(f"{name} is required")
 
           allowed = {
-              'disable_signature_verification',
-              'kaorios_toolbox',
-              'add_gboard',
-              'cn_notification_fix',
-              'disable_secure_flag',
+              "disable_signature_verification",
+              "kaorios_toolbox",
+              "add_gboard",
+              "cn_notification_fix",
+              "disable_secure_flag",
           }
-          features = [x.strip() for x in os.environ['FEATURES'].split(',') if x.strip()]
+          raw = os.environ.get("FEATURES", "") or "disable_signature_verification"
+          features = [item.strip() for item in raw.split(",") if item.strip()]
           unknown = sorted(set(features) - allowed)
           if unknown:
-              raise SystemExit('Unsupported features: ' + ', '.join(unknown))
-          if api in {'33', '34'}:
-              unsupported = sorted(set(features) & {'cn_notification_fix', 'disable_secure_flag'})
-              if unsupported:
-                  raise SystemExit(f'API {api} does not support: ' + ', '.join(unsupported))
+              raise SystemExit("Unsupported features: " + ", ".join(unknown))
 
-      - name: 📥 Checkout Framework Patcher engine
-        uses: actions/checkout@v4
+          if api in {"33", "34"}:
+              unsupported = sorted(set(features) & {"cn_notification_fix", "disable_secure_flag"})
+              if unsupported:
+                  raise SystemExit(f"API {api} does not support: " + ", ".join(unsupported))
+
+      - name: 📥 Checkout private Framework Patcher engine
+        uses: actions/checkout@v5
         with:
           repository: mohammedmezo99/DeadZone-xiaomi_FrameworkPatcher
           ref: main
           token: ${{ secrets.GH_TOKEN }}
           path: framework-patcher
-          submodules: recursive
           fetch-depth: 1
           persist-credentials: false
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: 🧰 Install patcher dependencies
-        working-directory: framework-patcher
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y p7zip-full wget zip python3 python3-pip
-          python3 -m pip install --user gdown
+          sudo apt-get install -y p7zip-full wget zip unzip python3 python3-pip
+          python3 -m pip install --user --break-system-packages gdown
 
       - name: 🔧 Prepare and verify Apktool
         working-directory: framework-patcher
@@ -140,9 +146,11 @@ jobs:
           mkdir -p tools
           APKTOOL_URL=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['url'])")
           APKTOOL_SHA=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['sha256'])")
+
           if [[ ! -f tools/apktool.jar ]]; then
             wget -q -O tools/apktool.jar "$APKTOOL_URL"
           fi
+
           ACTUAL_SHA=$(sha256sum tools/apktool.jar | awk '{print $1}')
           if [[ "$ACTUAL_SHA" != "$APKTOOL_SHA" ]]; then
             echo "::error::apktool.jar SHA256 mismatch"
@@ -158,31 +166,42 @@ jobs:
           FEATURES: ${{ inputs.features }}
         run: |
           set -euo pipefail
-          features="${FEATURES:-disable_signature_verification}"
+          features=$(tr -d '[:space:]' <<<"${FEATURES:-disable_signature_verification}")
+          [[ -z "$features" ]] && features=disable_signature_verification
+
+          has_feature() {
+            [[ ",$features," == *",$1,"* ]]
+          }
+
           need_framework=0
           need_services=0
           need_miui_services=0
           need_miui_framework=0
 
-          [[ "$features" == *disable_signature_verification* ]] && need_framework=1 && need_services=1 && need_miui_services=1
-          [[ "$features" == *kaorios_toolbox* ]] && need_framework=1
-          [[ "$features" == *add_gboard* ]] && need_miui_services=1 && need_miui_framework=1
-
-          if [[ "$API_LEVEL" == '35' || "$API_LEVEL" == '36' ]]; then
-            [[ "$features" == *cn_notification_fix* ]] && need_miui_services=1
-            [[ "$features" == *disable_secure_flag* ]] && need_services=1 && need_miui_services=1
-          fi
-
-          if [[ $need_framework -eq 0 && $need_services -eq 0 && $need_miui_services -eq 0 && $need_miui_framework -eq 0 ]]; then
+          if has_feature disable_signature_verification; then
             need_framework=1
             need_services=1
             need_miui_services=1
+          fi
+          has_feature kaorios_toolbox && need_framework=1
+          if has_feature add_gboard; then
+            need_miui_services=1
+            need_miui_framework=1
+          fi
+
+          if [[ "$API_LEVEL" == '35' || "$API_LEVEL" == '36' ]]; then
+            has_feature cn_notification_fix && need_miui_services=1
+            if has_feature disable_secure_flag; then
+              need_services=1
+              need_miui_services=1
+            fi
           fi
 
           echo "need_framework=$need_framework" >> "$GITHUB_OUTPUT"
           echo "need_services=$need_services" >> "$GITHUB_OUTPUT"
           echo "need_miui_services=$need_miui_services" >> "$GITHUB_OUTPUT"
           echo "need_miui_framework=$need_miui_framework" >> "$GITHUB_OUTPUT"
+          echo "features=$features" >> "$GITHUB_OUTPUT"
 
           echo "📦 framework.jar: $need_framework"
           echo "⚙️ services.jar: $need_services"
@@ -206,18 +225,20 @@ jobs:
           download_file() {
             local url="$1"
             local output="$2"
+
             if [[ -z "$url" ]]; then
               echo "::error::$output URL is required for the selected features"
               exit 1
             fi
+
             echo "⬇️ Downloading $output"
             if grep -q 'drive.google.com' <<<"$url"; then
               local file_id
               file_id=$(sed -n 's|.*/d/\([^/?]*\).*|\1|p' <<<"$url")
               if [[ -n "$file_id" ]]; then
-                gdown -O "$output" "$file_id"
+                python3 -m gdown -O "$output" "$file_id"
               else
-                gdown -O "$output" "$url"
+                python3 -m gdown -O "$output" "$url"
               fi
             else
               wget -O "$output" "$url"
@@ -254,12 +275,12 @@ jobs:
           echo "codename=$safe" >> "$GITHUB_OUTPUT"
           echo "📱 Device codename: $safe"
 
-      - name: 🚀 Run Framework Patcher
+      - name: 🚀 Run private Framework Patcher engine
         working-directory: framework-patcher
         env:
           API_LEVEL: ${{ inputs.api_level }}
           VERSION_NAME: ${{ inputs.version_name }}
-          FEATURES: ${{ inputs.features }}
+          FEATURES: ${{ steps.requirements.outputs.features }}
           DEVICE_CODENAME: ${{ steps.device.outputs.codename }}
         run: |
           set -euo pipefail
@@ -272,21 +293,25 @@ jobs:
             exit 1
           fi
 
-          feature_flags=""
-          [[ "$FEATURES" == *disable_signature_verification* ]] && feature_flags+=" --disable-signature-verification"
-          [[ "$FEATURES" == *kaorios_toolbox* ]] && feature_flags+=" --kaorios-toolbox"
-          [[ "$FEATURES" == *add_gboard* ]] && feature_flags+=" --add-gboard"
-          if [[ "$API_LEVEL" == '35' || "$API_LEVEL" == '36' ]]; then
-            [[ "$FEATURES" == *cn_notification_fix* ]] && feature_flags+=" --cn-notification-fix"
-            [[ "$FEATURES" == *disable_secure_flag* ]] && feature_flags+=" --disable-secure-flag"
-          fi
-          [[ -z "${feature_flags// }" ]] && feature_flags=" --disable-signature-verification"
+          has_feature() {
+            [[ ",$FEATURES," == *",$1,"* ]]
+          }
 
-          jar_flags=""
-          [[ -f framework.jar ]] && jar_flags+=" --framework"
-          [[ -f services.jar ]] && jar_flags+=" --services"
-          [[ -f miui-services.jar ]] && jar_flags+=" --miui-services"
-          [[ -f miui-framework.jar ]] && jar_flags+=" --miui-framework"
+          feature_flags=()
+          has_feature disable_signature_verification && feature_flags+=(--disable-signature-verification)
+          has_feature kaorios_toolbox && feature_flags+=(--kaorios-toolbox)
+          has_feature add_gboard && feature_flags+=(--add-gboard)
+          if [[ "$API_LEVEL" == '35' || "$API_LEVEL" == '36' ]]; then
+            has_feature cn_notification_fix && feature_flags+=(--cn-notification-fix)
+            has_feature disable_secure_flag && feature_flags+=(--disable-secure-flag)
+          fi
+          [[ ${#feature_flags[@]} -eq 0 ]] && feature_flags=(--disable-signature-verification)
+
+          jar_flags=()
+          [[ -f framework.jar ]] && jar_flags+=(--framework)
+          [[ -f services.jar ]] && jar_flags+=(--services)
+          [[ -f miui-services.jar ]] && jar_flags+=(--miui-services)
+          [[ -f miui-framework.jar ]] && jar_flags+=(--miui-framework)
 
           export WORKFLOW_RUN_ID="${{ github.run_id }}"
           export WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -294,10 +319,20 @@ jobs:
 
           chmod +x "$patcher"
           : > "$log"
-          echo "🚀 Running Android ${android} patcher"
-          bash "$patcher" "$API_LEVEL" "$DEVICE_CODENAME" "$VERSION_NAME" $jar_flags $feature_flags 2>&1 | tee -a "$log"
 
-      - name: ✅ Verify generated module
+          echo "🚀 Running DeadZone FrameworkPatcher for Android ${android}"
+          echo "📦 JAR flags: ${jar_flags[*]}"
+          echo "✨ Feature flags: ${feature_flags[*]}"
+
+          bash "$patcher" \
+            "$API_LEVEL" \
+            "$DEVICE_CODENAME" \
+            "$VERSION_NAME" \
+            "${jar_flags[@]}" \
+            "${feature_flags[@]}" \
+            2>&1 | tee -a "$log"
+
+      - name: ✅ Verify generated DeadZone module
         id: output
         working-directory: framework-patcher
         env:
@@ -305,15 +340,23 @@ jobs:
         run: |
           set -euo pipefail
           zip_file=$(find . -maxdepth 1 -type f -name "Framework-Patcher-${DEVICE_CODENAME}*.zip" -printf '%f\n' | head -n 1)
+
           if [[ -z "$zip_file" ]]; then
             echo "::error::Framework Patcher module ZIP was not generated"
             exit 1
           fi
+
           unzip -t "$zip_file" >/dev/null
+          if [[ ! -s build-manifest.json ]]; then
+            echo "::error::build-manifest.json was not generated"
+            exit 1
+          fi
+
           echo "zip_file=$zip_file" >> "$GITHUB_OUTPUT"
           echo "✅ Module ready: $zip_file"
+          echo "🧾 Manifest ready: build-manifest.json"
 
-      - name: 📝 Prepare release information
+      - name: 📝 Prepare DeadZone release
         id: release
         working-directory: framework-patcher
         env:
@@ -321,34 +364,40 @@ jobs:
           DEVICE_NAME: ${{ inputs.device_name }}
           DEVICE_CODENAME: ${{ steps.device.outputs.codename }}
           VERSION_NAME: ${{ inputs.version_name }}
-          FEATURES: ${{ inputs.features }}
+          FEATURES: ${{ steps.requirements.outputs.features }}
         run: |
           set -euo pipefail
           android=$((API_LEVEL - 20))
           tag="framework-${{ github.run_id }}"
-          name="Android ${android} | ${DEVICE_CODENAME} | ${VERSION_NAME}"
+          name="🧩 DeadZone-Framework | Android ${android} | ${DEVICE_CODENAME} | ${VERSION_NAME}"
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+
           {
             echo 'body<<EOF'
-            echo "🧩 DeadZone Framework Patcher"
+            echo "# 🧩 DeadZone-Framework"
             echo
-            echo "📱 Device: ${DEVICE_NAME}"
-            echo "🏷️ Codename: ${DEVICE_CODENAME}"
-            echo "🧬 Version: ${VERSION_NAME}"
-            echo "🤖 Android: ${android} (API ${API_LEVEL})"
-            echo "✨ Features: ${FEATURES:-disable_signature_verification}"
+            echo "📱 **Device:** ${DEVICE_NAME}"
+            echo "🏷️ **Codename:** ${DEVICE_CODENAME}"
+            echo "🧬 **ROM Version:** ${VERSION_NAME}"
+            echo "🤖 **Android:** ${android} — API ${API_LEVEL}"
+            echo "✨ **Features:** ${FEATURES}"
             echo
-            echo "⚠️ This module is device/ROM-version specific."
+            echo "⚙️ Built by the private DeadZone FrameworkPatcher engine."
+            echo "🌐 Published by the public DeadZone-MEZO launcher."
+            echo
+            echo "⚠️ This module is built for this exact device / ROM version."
             echo "✅ Compatible with Magisk, KernelSU, and SUFS."
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: 📣 Create framework release
+      - name: 📣 Publish GitHub Release in DeadZone-MEZO
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          repository: ${{ github.repository }}
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.name }}
           body: ${{ steps.release.outputs.body }}
@@ -357,6 +406,7 @@ jobs:
             framework-patcher/build-manifest.json
 
       - name: 🧪 Upload patched JARs
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: framework-patched-jars-${{ github.run_id }}
@@ -370,15 +420,17 @@ jobs:
 
       - name: 📦 Upload module ZIP
         if: success()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: framework-module-${{ github.run_id }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
           path: framework-patcher/${{ steps.output.outputs.zip_file }}
 
       - name: 🧾 Upload build manifest
         if: success()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: framework-manifest-${{ github.run_id }}
@@ -388,6 +440,7 @@ jobs:
 
       - name: 📜 Upload build log
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: framework-build-log-${{ github.run_id }}
@@ -396,7 +449,7 @@ jobs:
           path: framework-patcher/build_log_android*.txt
 
       - name: ✅ Send Telegram success notification
-        if: success() && inputs.user_id != '' && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: success() && inputs.user_id != ''
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           USER_ID: ${{ inputs.user_id }}
@@ -406,14 +459,16 @@ jobs:
           API_LEVEL: ${{ inputs.api_level }}
           RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}
         run: |
+          set -euo pipefail
+          [[ -z "${BOT_TOKEN:-}" ]] && exit 0
           android=$((API_LEVEL - 20))
-          text="✅ DeadZone Framework ready%0A%0A📱 ${DEVICE_NAME}%0A🏷️ ${DEVICE_CODENAME}%0A🧬 ${VERSION_NAME}%0A🤖 Android ${android} / API ${API_LEVEL}%0A%0A⬇️ ${RELEASE_URL}"
+          text="✅ DeadZone Framework ready%0A%0A📱 ${DEVICE_NAME}%0A🏷️ ${DEVICE_CODENAME}%0A🧬 ${VERSION_NAME}%0A🤖 Android ${android} / API ${API_LEVEL}%0A%0A📣 Release:%0A${RELEASE_URL}"
           curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${USER_ID}" \
             --data-urlencode "text=${text}" >/dev/null
 
       - name: ❌ Send Telegram failure notification
-        if: failure() && inputs.user_id != '' && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: failure() && inputs.user_id != ''
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           USER_ID: ${{ inputs.user_id }}
@@ -421,11 +476,13 @@ jobs:
           API_LEVEL: ${{ inputs.api_level }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          [[ -z "${BOT_TOKEN:-}" ]] && exit 0
           text="❌ DeadZone Framework failed%0A%0A📱 ${DEVICE_NAME}%0A🤖 API ${API_LEVEL}%0A🔎 ${RUN_URL}"
           curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${USER_ID}" \
             --data-urlencode "text=${text}" >/dev/null
 
-      - name: 🧹 Cleanup private Framework Patcher source
+      - name: 🧹 Remove private Framework Patcher source
         if: always()
         run: rm -rf framework-patcher
