@@ -2,6 +2,10 @@ name: MEZO-Lite
 
 run-name: 🚀 MEZO-Lite build by ${{ inputs.builder_name || github.actor }}
 
+concurrency:
+  group: mezo-lite-build-queue
+  queue: max
+
 on:
   workflow_dispatch:
     inputs:
