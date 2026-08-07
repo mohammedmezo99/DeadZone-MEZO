@@ -197,8 +197,21 @@ jobs:
           fi
 
           install -m 600 "$source_file" "$target_file"
-          if ! rclone listremotes --config "$target_file" | grep -Fxq "${RCLONE_REMOTE_NAME}:"; then
-            echo "::error::Rclone configuration is not compatible with the loaded runtime"
+
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "::error::rclone is missing after builder setup"
+            exit 1
+          fi
+
+          if ! remote_list="$(rclone --config="$target_file" listremotes 2>&1)"; then
+            echo "::error::rclone failed to parse the central configuration"
+            printf '%s\n' "$remote_list"
+            exit 1
+          fi
+
+          if ! grep -Fxq "${RCLONE_REMOTE_NAME}:" <<<"$remote_list"; then
+            echo "::error::Configured rclone remote '${RCLONE_REMOTE_NAME}' was not found"
+            printf 'Detected remotes:\n%s\n' "$remote_list"
             exit 1
           fi
 
