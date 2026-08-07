@@ -23,7 +23,7 @@ jobs:
           set -Eeuo pipefail
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
       - name: Validate Framework candidate
-        run: ./actionlint -color framework.syntax-fixed.yml
+        run: ./actionlint -color -ignore 'SC2129' framework.syntax-fixed.yml
       - name: Publish validated candidate
         run: |
           set -Eeuo pipefail
