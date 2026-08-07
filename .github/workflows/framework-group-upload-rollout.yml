@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/framework-group-upload-rollout.yml'
-      - 'tools/generate_framework_group_workflow.py'
+      - 'tools/fix_framework_runtime_env.py'
 
 permissions:
   contents: write
@@ -19,23 +19,23 @@ jobs:
         with:
           ref: main
 
-      - name: 🧩 Generate Framework Telegram workflow
-        run: python3 tools/generate_framework_group_workflow.py
+      - name: 🔒 Fix Framework central runtime visibility
+        run: python3 tools/fix_framework_runtime_env.py
 
-      - name: ✅ Validate generated candidate
+      - name: ✅ Validate fixed candidate
         run: |
           set -Eeuo pipefail
-          test -s framework.generated.yml
-          grep -q 'telegram_files:' framework.generated.yml
-          grep -q 'telethon==1.44.0' framework.generated.yml
-          grep -q 'Download Framework JARs from private Telegram storage' framework.generated.yml
-          ! grep -q 'queue: max' framework.generated.yml
+          test -s framework.runtime-fixed.yml
+          grep -q 'source runtime/bot.env' framework.runtime-fixed.yml
+          grep -q 'TELEGRAM_API_HASH' framework.runtime-fixed.yml
+          grep -q 'DZ_EVENT_SECRET=%s' framework.runtime-fixed.yml
+          ! grep -q 'required=(DEADZONE_ENGINE_REPOSITORY' framework.runtime-fixed.yml
 
-      - name: 💾 Publish generated candidate
+      - name: 💾 Publish fixed candidate
         run: |
           set -Eeuo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add framework.generated.yml
-          git commit -m "build: stage Framework Telegram workflow candidate"
+          git add framework.runtime-fixed.yml
+          git commit -m "build: stage Framework runtime-fixed workflow candidate"
           git push origin HEAD:main
