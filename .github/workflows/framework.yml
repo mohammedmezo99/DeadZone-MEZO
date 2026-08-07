@@ -65,15 +65,17 @@ jobs:
     name: 🧩 Build DeadZone Framework
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
-      - name: 🔐 Validate launcher credential
+      - name: 🔐 Validate bootstrap credential
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::Missing required repository secret: GH_TOKEN"
+            echo "::error::Missing bootstrap repository secret: GH_TOKEN"
             exit 1
           fi
 
@@ -113,15 +115,76 @@ jobs:
               if unsupported:
                   raise SystemExit(f"API {api} does not support: " + ", ".join(unsupported))
 
-      - name: 📥 Checkout private Framework Patcher engine
+      - name: 🔒 Checkout central DeadZone runtime
         uses: actions/checkout@v5
         with:
-          repository: mohammedmezo99/DeadZone-xiaomi_FrameworkPatcher
+          repository: mohammedmezo99/DeadZone-File
           ref: main
           token: ${{ secrets.GH_TOKEN }}
-          path: framework-patcher
+          path: runtime
           fetch-depth: 1
           persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+          sparse-checkout-cone-mode: false
+
+      - name: ⚙️ Load central Framework runtime
+        id: runtime
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: "1"
+        run: |
+          set -euo pipefail
+          for runtime_file in projects.env build.env rclone.conf load-build.sh; do
+            if [[ ! -s "runtime/${runtime_file}" ]]; then
+              echo "::error::Central runtime file is missing or empty: ${runtime_file}"
+              exit 1
+            fi
+          done
+          chmod 700 runtime/load-build.sh
+          runtime/load-build.sh framework
+
+      - name: ✅ Validate central Framework runtime
+        env:
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+          MODULE_REPOSITORY: ${{ steps.runtime.outputs.framework_module_repository }}
+        run: |
+          set -euo pipefail
+          required=(
+            ENGINE_REPOSITORY
+            DEADZONE_ENGINE_REPOSITORY
+            PRIVATE_REPO_TOKEN
+            GH_TOKEN
+            TELEGRAM_BOT_TOKEN
+          )
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Central Framework runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+
+          if [[ "$ENGINE_REPOSITORY" != "$DEADZONE_ENGINE_REPOSITORY" ]]; then
+            echo "::error::Runtime engine output does not match the central project map"
+            exit 1
+          fi
+
+          echo "✅ Central Framework runtime loaded"
+          echo "🧩 Engine: ${ENGINE_REPOSITORY}"
+          [[ -n "${MODULE_REPOSITORY:-}" ]] && echo "📦 Module source: ${MODULE_REPOSITORY}"
+
+      - name: 📥 Checkout private Framework Patcher engine
+        env:
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+        run: |
+          set -euo pipefail
+          rm -rf framework-patcher
+          gh repo clone "$ENGINE_REPOSITORY" framework-patcher -- --branch main --depth 1
+          test -s framework-patcher/VERSION
+          echo "✅ Private Framework Patcher engine checked out"
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -451,7 +514,6 @@ jobs:
       - name: ✅ Send Telegram success notification
         if: success() && inputs.user_id != ''
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           USER_ID: ${{ inputs.user_id }}
           DEVICE_NAME: ${{ inputs.device_name }}
           DEVICE_CODENAME: ${{ steps.device.outputs.codename }}
@@ -460,7 +522,8 @@ jobs:
           RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          [[ -z "${BOT_TOKEN:-}" ]] && exit 0
+          BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+          [[ -z "$BOT_TOKEN" ]] && exit 0
           android=$((API_LEVEL - 20))
           text="✅ DeadZone Framework ready%0A%0A📱 ${DEVICE_NAME}%0A🏷️ ${DEVICE_CODENAME}%0A🧬 ${VERSION_NAME}%0A🤖 Android ${android} / API ${API_LEVEL}%0A%0A📣 Release:%0A${RELEASE_URL}"
           curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
@@ -470,19 +533,19 @@ jobs:
       - name: ❌ Send Telegram failure notification
         if: failure() && inputs.user_id != ''
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           USER_ID: ${{ inputs.user_id }}
           DEVICE_NAME: ${{ inputs.device_name }}
           API_LEVEL: ${{ inputs.api_level }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          [[ -z "${BOT_TOKEN:-}" ]] && exit 0
+          BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+          [[ -z "$BOT_TOKEN" ]] && exit 0
           text="❌ DeadZone Framework failed%0A%0A📱 ${DEVICE_NAME}%0A🤖 API ${API_LEVEL}%0A🔎 ${RUN_URL}"
           curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${USER_ID}" \
             --data-urlencode "text=${text}" >/dev/null
 
-      - name: 🧹 Remove private Framework Patcher source
+      - name: 🧹 Remove private runtime and engine
         if: always()
-        run: rm -rf framework-patcher
+        run: rm -rf runtime framework-patcher
