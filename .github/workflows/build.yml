@@ -72,6 +72,24 @@ jobs:
             exit 1
           fi
 
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: Clean unused runner packages
+        run: |
+          set -euo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
+
       - name: Checkout private runtime
         uses: actions/checkout@v4
         with:
@@ -129,24 +147,6 @@ jobs:
           printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 512
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-
-      - name: Clean unused runner packages
-        run: |
-          set -euo pipefail
-          docker image prune --all --force || true
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
-          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
-          sudo apt-get autoremove --purge -y || true
-          sudo apt-get clean
 
       - name: Checkout private builder source
         uses: actions/checkout@v4
