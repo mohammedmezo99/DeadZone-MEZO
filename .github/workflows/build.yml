@@ -226,6 +226,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
+          python3 notify.py pack "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
       - name: ⬆️ Upload ROM
