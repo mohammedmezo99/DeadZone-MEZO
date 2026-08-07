@@ -1,4 +1,4 @@
-name: Migrate Framework Launcher to File IDs
+name: Stage Framework File-ID Workflow
 
 on:
   push:
@@ -11,15 +11,15 @@ permissions:
   contents: write
 
 jobs:
-  migrate:
+  stage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           ref: main
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ github.token }}
       - run: python3 tools/migrate_framework_fileid.py
-      - name: Validate Framework workflow
+      - name: Validate and stage candidate
         run: |
           set -Eeuo pipefail
           grep -q 'Telegram file ID map' .github/workflows/framework.yml
@@ -27,19 +27,19 @@ jobs:
           grep -q 'download_media(file_id.strip()' .github/workflows/framework.yml
           ! grep -q 'client.iter_dialogs' .github/workflows/framework.yml
           ! grep -q 'Invalid CLOUD_CHANNEL_ID' .github/workflows/framework.yml
-          python3 -m pip install --quiet yq
           python3 - <<'PY'
           import yaml
           from pathlib import Path
-          with Path('.github/workflows/framework.yml').open(encoding='utf-8') as f:
-              doc = yaml.safe_load(f)
+          source = Path('.github/workflows/framework.yml')
+          doc = yaml.safe_load(source.read_text(encoding='utf-8'))
           if not isinstance(doc, dict) or 'jobs' not in doc:
               raise SystemExit('framework.yml is not valid workflow YAML')
+          Path('framework.fileid.generated.yml').write_text(source.read_text(encoding='utf-8'), encoding='utf-8')
           PY
       - run: |
           git config user.name "Mohammed MEZO"
           git config user.email "cavo.store2026@gmail.com"
-          git add .github/workflows/framework.yml
+          git add framework.fileid.generated.yml
           git diff --cached --check
-          git commit -m "fix: download Framework JARs from Telegram file IDs"
+          git commit -m "chore: stage Framework file-ID workflow candidate"
           git push origin HEAD:main
