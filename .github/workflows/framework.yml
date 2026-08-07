@@ -180,41 +180,42 @@ jobs:
             [[ -s "runtime/${runtime_file}" ]] || { echo "::error::Missing central runtime file: ${runtime_file}"; exit 1; }
           done
           chmod 700 runtime/load-build.sh
+
+          # Values written to GITHUB_ENV become visible to later steps only.
+          # Source the trusted private runtime here as well because this step
+          # must validate/mask the Telegram transport before continuing.
+          set -a
+          # shellcheck disable=SC1091
+          source runtime/build.env
+          # shellcheck disable=SC1091
+          source runtime/bot.env
+          set +a
+
           runtime/load-build.sh framework
 
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          wanted = {"TELEGRAM_BOT_TOKEN", "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "CLOUD_CHANNEL_ID"}
-          values = {}
-          for raw in Path("runtime/bot.env").read_text(encoding="utf-8").splitlines():
-              line = raw.strip()
-              if not line or line.startswith("#") or "=" not in line:
-                  continue
-              key, value = line.split("=", 1)
-              if key in wanted:
-                  values[key] = value.strip().strip('"').strip("'")
-          missing = sorted(wanted - values.keys())
-          if missing:
-              raise SystemExit("Missing central Telegram runtime values: " + ", ".join(missing))
-          if not values["TELEGRAM_API_ID"].isdigit():
-              raise SystemExit("Invalid TELEGRAM_API_ID")
-          channel = values["CLOUD_CHANNEL_ID"]
-          if not channel.lstrip("-").isdigit() or int(channel) >= 0:
-              raise SystemExit("Invalid CLOUD_CHANNEL_ID")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-              for key, value in values.items():
-                  print(f"::add-mask::{value}")
-                  output.write(f"{key}={value}\n")
-          PY
-
-          required=(DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN BUILD_PROGRESS_SECRET RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR RCLONE_CONFIG_BASE64 TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID)
+          required=(BUILD_PROGRESS_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID)
           for key in "${required[@]}"; do
             [[ -n "${!key:-}" ]] || { echo "::error::Central runtime value is missing: ${key}"; exit 1; }
           done
-          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
-          printf 'DZ_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+          [[ "$TELEGRAM_API_ID" =~ ^[0-9]+$ ]] || { echo "::error::Invalid TELEGRAM_API_ID"; exit 1; }
+          [[ "$CLOUD_CHANNEL_ID" =~ ^-[0-9]+$ ]] || { echo "::error::Invalid CLOUD_CHANNEL_ID"; exit 1; }
+
+          for key in BUILD_PROGRESS_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID; do
+            printf '::add-mask::%s
+' "${!key}"
+          done
+          {
+            printf 'TELEGRAM_BOT_TOKEN=%s
+' "$TELEGRAM_BOT_TOKEN"
+            printf 'TELEGRAM_API_ID=%s
+' "$TELEGRAM_API_ID"
+            printf 'TELEGRAM_API_HASH=%s
+' "$TELEGRAM_API_HASH"
+            printf 'CLOUD_CHANNEL_ID=%s
+' "$CLOUD_CHANNEL_ID"
+            printf 'DZ_EVENT_SECRET=%s
+' "$BUILD_PROGRESS_SECRET"
+          } >> "$GITHUB_ENV"
 
       - name: 📡 Prepare signed DeadZone events
         run: |
