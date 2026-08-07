@@ -21,3 +21,5 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
       - name: Validate Framework workflow
         run: ./actionlint -color .github/workflows/framework.yml
+
+# syntax validation trigger
