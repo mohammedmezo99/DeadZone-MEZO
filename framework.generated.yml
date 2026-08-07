@@ -1,0 +1,593 @@
+name: DeadZone-Framework
+
+run-name: 🧩 DeadZone-Framework  ${{ inputs.request_id || github.run_id }}
+
+concurrency:
+  group: deadzone-framework-build-queue
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 🆔 DeadZone controlled request ID
+        required: false
+        type: string
+      android_version:
+        description: 🤖 Android version
+        required: true
+        default: '16'
+        type: choice
+        options:
+          - '13'
+          - '14'
+          - '15'
+          - '16'
+      device_name:
+        description: 📱 Device codename
+        required: true
+        type: string
+      rom_version:
+        description: 🧬 ROM / firmware version
+        required: true
+        type: string
+      features:
+        description: ✨ Features — comma separated
+        required: false
+        default: disable_signature_verification
+        type: string
+      telegram_files:
+        description: 📦 Telegram storage message map (JSON)
+        required: true
+        type: string
+      callback_url:
+        description: 🔗 DeadZone signed build-event endpoint
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    name: 🧩 Build DeadZone Framework
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DZ_REQUEST_ID: ${{ inputs.request_id }}
+      DZ_ANDROID_VERSION: ${{ inputs.android_version }}
+      DZ_DEVICE_NAME: ${{ inputs.device_name }}
+      DZ_ROM_VERSION: ${{ inputs.rom_version }}
+      DZ_FEATURES: ${{ inputs.features }}
+      DZ_CALLBACK_URL: ${{ inputs.callback_url }}
+      DZ_PROJECT: frameworkpatcher
+
+    steps:
+      - name: 🧾 Validate Framework request
+        shell: python
+        env:
+          TELEGRAM_FILES: ${{ inputs.telegram_files }}
+        run: |
+          import json
+          import os
+          import re
+          from urllib.parse import urlparse
+
+          android = os.environ["DZ_ANDROID_VERSION"].strip()
+          device = os.environ["DZ_DEVICE_NAME"].strip()
+          rom = os.environ["DZ_ROM_VERSION"].strip()
+          request_id = os.environ.get("DZ_REQUEST_ID", "").strip()
+          callback = os.environ.get("DZ_CALLBACK_URL", "").strip()
+          features = [x.strip() for x in os.environ.get("DZ_FEATURES", "").split(",") if x.strip()]
+          if not features:
+              features = ["disable_signature_verification"]
+
+          if android not in {"13", "14", "15", "16"}:
+              raise SystemExit("Supported Android versions are 13, 14, 15, and 16")
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}", device):
+              raise SystemExit("Invalid device codename")
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,127}", rom):
+              raise SystemExit("Invalid ROM version")
+          if request_id and not re.fullmatch(r"framework_[0-9a-f]{20}", request_id):
+              raise SystemExit("Invalid DeadZone Framework request ID")
+          if bool(request_id) != bool(callback):
+              raise SystemExit("Controlled Framework builds require request_id and callback_url together")
+          if callback:
+              parsed = urlparse(callback)
+              if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                  raise SystemExit("Invalid DeadZone callback URL")
+
+          allowed = {
+              "disable_signature_verification",
+              "cn_notification_fix",
+              "disable_secure_flag",
+              "kaorios_toolbox",
+              "add_gboard",
+          }
+          if len(features) != len(set(features)) or any(feature not in allowed for feature in features):
+              raise SystemExit("Invalid Framework feature selection")
+          if android in {"13", "14"} and any(feature in {"cn_notification_fix", "disable_secure_flag"} for feature in features):
+              raise SystemExit(f"Selected feature is unavailable on Android {android}")
+
+          try:
+              telegram_files = json.loads(os.environ.get("TELEGRAM_FILES", "{}"))
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"Invalid telegram_files JSON: {exc}")
+          if not isinstance(telegram_files, dict):
+              raise SystemExit("telegram_files must be a JSON object")
+          allowed_keys = {"framework_url", "services_url", "miui_services_url", "miui_framework_url"}
+          unknown = sorted(set(telegram_files) - allowed_keys)
+          if unknown:
+              raise SystemExit("Unknown Telegram Framework inputs: " + ", ".join(unknown))
+          for key, value in telegram_files.items():
+              if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                  raise SystemExit(f"Invalid Telegram message ID for {key}")
+
+          required = set()
+          for feature in features:
+              if feature == "disable_signature_verification":
+                  required |= {"framework_url", "services_url", "miui_services_url"}
+              elif feature == "cn_notification_fix":
+                  required.add("miui_services_url")
+              elif feature == "disable_secure_flag":
+                  required |= {"services_url", "miui_services_url"}
+              elif feature == "kaorios_toolbox":
+                  required.add("framework_url")
+              elif feature == "add_gboard":
+                  required |= {"miui_services_url", "miui_framework_url"}
+          missing = sorted(key for key in required if key not in telegram_files)
+          if missing:
+              raise SystemExit("Missing required Telegram Framework inputs: " + ", ".join(missing))
+
+          api = {"13": "33", "14": "34", "15": "35", "16": "36"}[android]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"DZ_API_LEVEL={api}\n")
+              output.write(f"DZ_FEATURES_CSV={','.join(features)}\n")
+              output.write(f"DZ_CONTROLLED={'1' if request_id else '0'}\n")
+
+      - name: 🔐 Validate launcher credential
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || { echo "::error::Missing bootstrap repository secret: GH_TOKEN"; exit 1; }
+
+      - name: 🔒 Checkout central DeadZone runtime
+        uses: actions/checkout@v5
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+            bot.env
+          sparse-checkout-cone-mode: false
+
+      - name: ⚙️ Load central Framework runtime
+        id: runtime
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: ${{ env.DZ_CONTROLLED }}
+        run: |
+          set -Eeuo pipefail
+          for runtime_file in projects.env build.env rclone.conf load-build.sh bot.env; do
+            [[ -s "runtime/${runtime_file}" ]] || { echo "::error::Missing central runtime file: ${runtime_file}"; exit 1; }
+          done
+          chmod 700 runtime/load-build.sh
+          runtime/load-build.sh framework
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          wanted = {"TELEGRAM_BOT_TOKEN", "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "CLOUD_CHANNEL_ID"}
+          values = {}
+          for raw in Path("runtime/bot.env").read_text(encoding="utf-8").splitlines():
+              line = raw.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              if key in wanted:
+                  values[key] = value.strip().strip('"').strip("'")
+          missing = sorted(wanted - values.keys())
+          if missing:
+              raise SystemExit("Missing central Telegram runtime values: " + ", ".join(missing))
+          if not values["TELEGRAM_API_ID"].isdigit():
+              raise SystemExit("Invalid TELEGRAM_API_ID")
+          channel = values["CLOUD_CHANNEL_ID"]
+          if not channel.lstrip("-").isdigit() or int(channel) >= 0:
+              raise SystemExit("Invalid CLOUD_CHANNEL_ID")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  print(f"::add-mask::{value}")
+                  output.write(f"{key}={value}\n")
+          PY
+
+          required=(DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN BUILD_PROGRESS_SECRET RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR RCLONE_CONFIG_BASE64 TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH CLOUD_CHANNEL_ID)
+          for key in "${required[@]}"; do
+            [[ -n "${!key:-}" ]] || { echo "::error::Central runtime value is missing: ${key}"; exit 1; }
+          done
+          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          printf 'DZ_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+
+      - name: 📡 Prepare signed DeadZone events
+        run: |
+          cat > "$RUNNER_TEMP/deadzone-framework-event.py" <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+          import uuid
+          from datetime import datetime, timezone
+
+          callback = os.environ.get("DZ_CALLBACK_URL", "").strip()
+          request_id = os.environ.get("DZ_REQUEST_ID", "").strip()
+          secret = os.environ.get("DZ_EVENT_SECRET", "").strip()
+          if not callback or not request_id or not secret:
+              raise SystemExit(0)
+
+          status = sys.argv[1]
+          progress = int(sys.argv[2])
+          message = sys.argv[3]
+          payload = {
+              "event_id": f"{request_id}-{uuid.uuid4().hex}",
+              "request_id": request_id,
+              "project": "frameworkpatcher",
+              "status": status,
+              "progress": progress,
+              "message": message,
+              "occurred_at": datetime.now(timezone.utc).isoformat(),
+              "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "run_url": f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}",
+          }
+          if status == "succeeded":
+              payload.update({
+                  "result_url": os.environ["DZ_RESULT_URL"],
+                  "artifact_name": os.environ["DZ_ARTIFACT_NAME"],
+                  "device_name": os.environ["DZ_DEVICE_NAME"],
+                  "codename": os.environ["DZ_DEVICE_NAME"],
+                  "rom_version": os.environ["DZ_ROM_VERSION"],
+                  "android_version": os.environ["DZ_ANDROID_VERSION"],
+              })
+          body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+          timestamp = str(int(time.time()))
+          signature = hmac.new(secret.encode(), f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
+          request = urllib.request.Request(
+              callback,
+              data=body.encode(),
+              method="POST",
+              headers={
+                  "Content-Type": "application/json",
+                  "X-DeadZone-Timestamp": timestamp,
+                  "X-DeadZone-Signature": f"sha256={signature}",
+                  "User-Agent": "DeadZone-Framework/1.0",
+              },
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  if response.status not in {200, 202}:
+                      raise RuntimeError(f"callback HTTP {response.status}")
+          except Exception as exc:
+              print(f"::warning::DeadZone callback failed: {exc}")
+          PY
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 8 "DeadZone-Framework request accepted." || true
+
+      - name: 📥 Checkout private FrameworkPatcher engine
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.runtime.outputs.engine_repository }}
+          ref: main
+          token: ${{ env.PRIVATE_REPO_TOKEN }}
+          path: engine
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 🧰 Install Framework dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates p7zip-full wget zip unzip python3 python3-pip rclone
+          python3 -m pip install --user --break-system-packages "gdown==5.2.0" "telethon==1.44.0"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          chmod +x engine/scripts/patcher_a13.sh engine/scripts/patcher_a14.sh engine/scripts/patcher_a15.sh engine/scripts/patcher_a16.sh
+          [[ -s engine/templates/framework-patcher-module/module.prop ]] || { echo "::error::Framework module template is missing"; exit 1; }
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 18 "Private Framework engine loaded." || true
+
+      - name: 🔧 Prepare and verify Apktool
+        working-directory: engine
+        run: |
+          set -Eeuo pipefail
+          APKTOOL_URL=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['url'])")
+          APKTOOL_SHA=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['sha256'])")
+          [[ -f tools/apktool.jar ]] || wget -q -O tools/apktool.jar "$APKTOOL_URL"
+          ACTUAL_SHA=$(sha256sum tools/apktool.jar | awk '{print $1}')
+          [[ "$ACTUAL_SHA" == "$APKTOOL_SHA" ]] || { echo "::error::apktool.jar SHA256 mismatch"; exit 1; }
+          echo "✅ apktool.jar verified"
+
+      - name: 📥 Download Framework JARs from private Telegram storage
+        working-directory: engine
+        env:
+          TELEGRAM_FILES: ${{ inputs.telegram_files }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import asyncio
+          import json
+          import os
+          import pathlib
+          import zipfile
+
+          from telethon import TelegramClient
+          from telethon.sessions import StringSession
+
+          message_map = json.loads(os.environ["TELEGRAM_FILES"])
+          api_id = int(os.environ["TELEGRAM_API_ID"])
+          api_hash = os.environ["TELEGRAM_API_HASH"]
+          bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+          storage_chat_id = int(os.environ["CLOUD_CHANNEL_ID"])
+          inputs = {
+              "framework.jar": "framework_url",
+              "services.jar": "services_url",
+              "miui-services.jar": "miui_services_url",
+              "miui-framework.jar": "miui_framework_url",
+          }
+
+          async def main():
+              client = TelegramClient(StringSession(), api_id, api_hash)
+              await client.start(bot_token=bot_token)
+              try:
+                  entity = None
+                  async for dialog in client.iter_dialogs():
+                      if dialog.id == storage_chat_id:
+                          entity = dialog.entity
+                          break
+                  if entity is None:
+                      raise RuntimeError("DeadZone Telegram storage channel is unavailable to the bot")
+
+                  downloaded_ids = []
+                  targets = []
+                  for name, key in inputs.items():
+                      message_id = message_map.get(key)
+                      if not message_id:
+                          continue
+                      message = await client.get_messages(entity, ids=int(message_id))
+                      if message is None or message.document is None:
+                          raise RuntimeError(f"Telegram storage message is not a document: {name}")
+                      target = pathlib.Path(name)
+                      result = await client.download_media(message, file=str(target))
+                      if not result or not target.is_file():
+                          raise RuntimeError(f"Telegram download failed: {name}")
+                      downloaded_ids.append(int(message_id))
+                      targets.append(target)
+
+                  for target in targets:
+                      size = target.stat().st_size
+                      if size < 1_500_000 or size > 120 * 1024 * 1024 or not zipfile.is_zipfile(target):
+                          raise RuntimeError(f"Invalid JAR input: {target.name}")
+                      print(f"✅ {target.name} validated ({size} bytes)")
+
+                  if downloaded_ids:
+                      await client.delete_messages(entity, downloaded_ids)
+              finally:
+                  await client.disconnect()
+
+          asyncio.run(main())
+          PY
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 32 "Framework JAR inputs verified from Telegram storage." || true
+
+      - name: 🚀 Run FrameworkPatcher engine
+        working-directory: engine
+        run: |
+          set -Eeuo pipefail
+          patcher="scripts/patcher_a${DZ_ANDROID_VERSION}.sh"
+          [[ -x "$patcher" ]] || { echo "::error::Missing patcher: $patcher"; exit 1; }
+
+          jar_flags=()
+          [[ -f framework.jar ]] && jar_flags+=(--framework)
+          [[ -f services.jar ]] && jar_flags+=(--services)
+          [[ -f miui-services.jar ]] && jar_flags+=(--miui-services)
+          [[ -f miui-framework.jar ]] && jar_flags+=(--miui-framework)
+
+          feature_flags=()
+          IFS=',' read -r -a selected <<< "$DZ_FEATURES_CSV"
+          for feature in "${selected[@]}"; do
+            case "$feature" in
+              disable_signature_verification) feature_flags+=(--disable-signature-verification) ;;
+              cn_notification_fix) feature_flags+=(--cn-notification-fix) ;;
+              disable_secure_flag) feature_flags+=(--disable-secure-flag) ;;
+              kaorios_toolbox) feature_flags+=(--kaorios-toolbox) ;;
+              add_gboard) feature_flags+=(--add-gboard) ;;
+              *) echo "::error::Unsupported feature: $feature"; exit 1 ;;
+            esac
+          done
+
+          export WORKFLOW_RUN_ID="${GITHUB_RUN_ID}"
+          export WORKFLOW_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          export WORKFLOW_RELEASE_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/framework-${GITHUB_RUN_ID}"
+          export DEADZONE_STRICT_PATCHES=1
+
+          : > deadzone-framework.log
+          echo "🚀 Android ${DZ_ANDROID_VERSION} / API ${DZ_API_LEVEL}"
+          echo "📦 JAR flags: ${jar_flags[*]}"
+          echo "✨ Features: ${feature_flags[*]}"
+          bash "$patcher" \
+            "$DZ_API_LEVEL" \
+            "$DZ_DEVICE_NAME" \
+            "$DZ_ROM_VERSION" \
+            "${jar_flags[@]}" \
+            "${feature_flags[@]}" \
+            2>&1 | tee -a deadzone-framework.log
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 68 "Framework patches completed." || true
+
+      - name: 📦 Verify generated DeadZone module
+        id: output
+        working-directory: engine
+        run: |
+          set -Eeuo pipefail
+          mapfile -t outputs < <(find . -maxdepth 1 -type f -name 'Framework-Patcher-*.zip' -printf '%f\n' | sort)
+          [[ ${#outputs[@]} -eq 1 ]] || { echo "::error::Expected exactly one Framework module ZIP"; exit 1; }
+          zip_file="${outputs[0]}"
+          unzip -t "$zip_file" >/dev/null
+          [[ -s build-manifest.json ]] || { echo "::error::build-manifest.json is missing"; exit 1; }
+          size=$(stat -c%s "$zip_file")
+          sha=$(sha256sum "$zip_file" | awk '{print $1}')
+          echo "zip_file=$zip_file" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "DZ_ARTIFACT_NAME=$zip_file" >> "$GITHUB_ENV"
+          echo "DZ_ARTIFACT_SIZE=$size" >> "$GITHUB_ENV"
+          echo "DZ_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+          echo "✅ Module verified: $zip_file"
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 78 "Framework module verified and ready for upload." || true
+
+      - name: ☁️ Upload Framework module to DeadZone Cloud
+        working-directory: engine
+        run: |
+          set -Eeuo pipefail
+          config="$RUNNER_TEMP/deadzone-framework-rclone.conf"
+          umask 077
+          printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$config"
+          chmod 600 "$config"
+          base_dir="${RCLONE_UPLOAD_DIR#/}"
+          base_dir="${base_dir%/}"
+          request_dir="${DZ_REQUEST_ID:-manual-${GITHUB_RUN_ID}}"
+          remote="${RCLONE_REMOTE_NAME}:${base_dir}/frameworkpatcher/${request_dir}/Android${DZ_ANDROID_VERSION}/${DZ_DEVICE_NAME}/${DZ_ARTIFACT_NAME}"
+          rclone --config "$config" copyto "$DZ_ARTIFACT_NAME" "$remote" --transfers 1
+          link="$(rclone --config "$config" link "$remote")"
+          [[ "$link" == https://* ]] || { echo "::error::Invalid DeadZone Cloud link"; exit 1; }
+          echo "::add-mask::$link"
+          echo "DZ_RESULT_URL=$link" >> "$GITHUB_ENV"
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" uploading 90 "Framework module uploaded to DeadZone Cloud." || true
+
+      - name: 🧾 Create result contract and Release metadata
+        id: release
+        working-directory: engine
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          result = {
+              "schema_version": "1.0",
+              "request_id": os.environ.get("DZ_REQUEST_ID") or f"manual-{os.environ['GITHUB_RUN_ID']}",
+              "project": "frameworkpatcher",
+              "status": "success",
+              "provider": "google_drive",
+              "url": os.environ["DZ_RESULT_URL"],
+              "file_name": os.environ["DZ_ARTIFACT_NAME"],
+              "sha256": os.environ["DZ_ARTIFACT_SHA256"],
+              "size": int(os.environ["DZ_ARTIFACT_SIZE"]),
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+              "android_version": os.environ["DZ_ANDROID_VERSION"],
+              "device_name": os.environ["DZ_DEVICE_NAME"],
+              "rom_version": os.environ["DZ_ROM_VERSION"],
+              "features": [x for x in os.environ["DZ_FEATURES_CSV"].split(",") if x],
+          }
+          with open("deadzone-result.json", "w", encoding="utf-8") as stream:
+              json.dump(result, stream, sort_keys=True, indent=2)
+          PY
+
+          tag="framework-${GITHUB_RUN_ID}"
+          name="🧩 DeadZone-Framework | Android ${DZ_ANDROID_VERSION} | ${DZ_DEVICE_NAME} | ${DZ_ROM_VERSION}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<EOF'
+            echo '# 🧩 DeadZone-Framework'
+            echo
+            echo "📱 **Device:** ${DZ_DEVICE_NAME}"
+            echo "🧬 **ROM Version:** ${DZ_ROM_VERSION}"
+            echo "🤖 **Android:** ${DZ_ANDROID_VERSION} — API ${DZ_API_LEVEL}"
+            echo "✨ **Features:** ${DZ_FEATURES_CSV}"
+            [[ -n "${DZ_REQUEST_ID:-}" ]] && echo "🆔 **Build:** ${DZ_REQUEST_ID}"
+            echo
+            echo '⚙️ Built by the private DeadZone FrameworkPatcher engine.'
+            echo '🌐 Published by the public DeadZone-MEZO launcher.'
+            echo '✅ Compatible with Magisk, KernelSU, and SUFS.'
+            echo
+            echo '⚠️ This module is specific to this device and ROM version.'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 📣 Publish GitHub Release in DeadZone-MEZO
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          body: ${{ steps.release.outputs.body }}
+          files: |
+            engine/${{ steps.output.outputs.zip_file }}
+            engine/build-manifest.json
+            engine/deadzone-result.json
+
+      - name: ✅ Report Framework success to bot
+        if: success()
+        run: |
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" succeeded 100 "DeadZone-Framework completed successfully." || true
+          echo "✅ DeadZone-Framework completed"
+          echo "📣 ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${{ steps.release.outputs.tag }}"
+
+      - name: 📤 Expose result contract
+        if: success() && env.DZ_CONTROLLED == '1'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadzone-result-${{ env.DZ_REQUEST_ID }}
+          path: engine/deadzone-result.json
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: 🧪 Upload patched JAR diagnostics
+        if: success()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: framework-patched-jars-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            engine/framework_patched.jar
+            engine/services_patched.jar
+            engine/miui-services_patched.jar
+            engine/miui-framework_patched.jar
+
+      - name: 📜 Upload Framework build log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: framework-build-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: engine/deadzone-framework.log
+
+      - name: ❌ Report Framework failure to bot
+        if: failure()
+        run: |
+          python3 "$RUNNER_TEMP/deadzone-framework-event.py" failed 0 "DeadZone-Framework build failed." || true
+
+      - name: 🧹 Cleanup private runtime
+        if: always()
+        run: |
+          rm -rf runtime engine
+          rm -f "$RUNNER_TEMP/deadzone-framework-event.py" "$RUNNER_TEMP/deadzone-framework-rclone.conf"
