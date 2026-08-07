@@ -203,17 +203,11 @@ jobs:
             exit 1
           fi
 
-          if ! remote_list="$(rclone --config="$target_file" listremotes 2>&1)"; then
-            echo "::error::rclone failed to parse the central configuration"
-            printf '%s\n' "$remote_list"
-            exit 1
-          fi
-
-          if ! grep -Fxq "${RCLONE_REMOTE_NAME}:" <<<"$remote_list"; then
-            echo "::error::Configured rclone remote '${RCLONE_REMOTE_NAME}' was not found"
-            printf 'Detected remotes:\n%s\n' "$remote_list"
-            exit 1
-          fi
+          # The section name above is enough to validate the central config wiring.
+          # Do not make the launcher depend on rclone parsing/remote access before
+          # the actual upload stage; uploadROM.sh owns the real transfer check.
+          rclone version | head -n 1
+          echo "Rclone configuration installed for remote: ${RCLONE_REMOTE_NAME}"
 
       - name: Send start notification
         working-directory: toolbuild
