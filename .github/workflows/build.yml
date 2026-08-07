@@ -163,6 +163,12 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: 📣 Start live tracking
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
@@ -209,12 +215,6 @@ jobs:
 
           rclone version | head -n 1
           echo "Rclone configuration installed for remote: ${RCLONE_REMOTE_NAME}"
-
-      - name: 📣 Send start notification
-        working-directory: toolbuild
-        run: |
-          set -euo pipefail
-          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
       - name: 🚀 Build ROM
         working-directory: toolbuild
