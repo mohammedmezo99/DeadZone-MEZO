@@ -18,11 +18,7 @@ on:
         required: true
         default: '16'
         type: choice
-        options:
-          - '13'
-          - '14'
-          - '15'
-          - '16'
+        options: ['13', '14', '15', '16']
       device_name:
         description: 📱 Device codename
         required: true
@@ -115,6 +111,7 @@ jobs:
               raise SystemExit(f"Invalid telegram_files JSON: {exc}")
           if not isinstance(telegram_files, dict):
               raise SystemExit("telegram_files must be a JSON object")
+
           allowed_keys = {"framework_url", "services_url", "miui_services_url", "miui_framework_url"}
           unknown = sorted(set(telegram_files) - allowed_keys)
           if unknown:
@@ -135,6 +132,7 @@ jobs:
                   required.add("framework_url")
               elif feature == "add_gboard":
                   required |= {"miui_services_url", "miui_framework_url"}
+
           missing = sorted(key for key in required if key not in telegram_files)
           if missing:
               raise SystemExit("Missing required Telegram Framework inputs: " + ", ".join(missing))
@@ -150,7 +148,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -Eeuo pipefail
-          [[ -n "${GH_TOKEN:-}" ]] || { echo "::error::Missing bootstrap repository secret: GH_TOKEN"; exit 1; }
+          [[ -n "${GH_TOKEN:-}" ]] || { echo "::error::Missing shared launcher credential: GH_TOKEN"; exit 1; }
 
       - name: 🔒 Checkout central DeadZone runtime
         uses: actions/checkout@v5
@@ -176,14 +174,15 @@ jobs:
           DEADZONE_CONTROLLED_BUILD: ${{ env.DZ_CONTROLLED }}
         run: |
           set -Eeuo pipefail
+
           for runtime_file in projects.env build.env rclone.conf load-build.sh bot.env; do
-            [[ -s "runtime/${runtime_file}" ]] || { echo "::error::Missing central runtime file: ${runtime_file}"; exit 1; }
+            [[ -s "runtime/${runtime_file}" ]] || {
+              echo "::error::Missing central runtime file: ${runtime_file}"
+              exit 1
+            }
           done
           chmod 700 runtime/load-build.sh
 
-          # Values written to GITHUB_ENV become visible to later steps only.
-          # Source the trusted private runtime here as well because this step
-          # must validate/mask the Telegram transport before continuing.
           set -a
           # shellcheck disable=SC1091
           source runtime/build.env
@@ -193,11 +192,22 @@ jobs:
 
           runtime/load-build.sh framework
 
-          required=(BUILD_PROGRESS_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH)
+          required=(
+            BUILD_PROGRESS_SECRET
+            TELEGRAM_BOT_TOKEN
+            TELEGRAM_API_ID
+            TELEGRAM_API_HASH
+          )
           for key in "${required[@]}"; do
-            [[ -n "${!key:-}" ]] || { echo "::error::Central runtime value is missing: ${key}"; exit 1; }
+            [[ -n "${!key:-}" ]] || {
+              echo "::error::Central runtime value is missing: ${key}"
+              exit 1
+            }
           done
-          [[ "$TELEGRAM_API_ID" =~ ^[0-9]+$ ]] || { echo "::error::Invalid TELEGRAM_API_ID"; exit 1; }
+          [[ "$TELEGRAM_API_ID" =~ ^[0-9]+$ ]] || {
+            echo "::error::Invalid TELEGRAM_API_ID"
+            exit 1
+          }
 
           for key in BUILD_PROGRESS_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH; do
             echo "::add-mask::${!key}"
@@ -240,7 +250,11 @@ jobs:
               "message": message,
               "occurred_at": datetime.now(timezone.utc).isoformat(),
               "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-              "run_url": f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}",
+              "run_url": (
+                  f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                  f"{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/"
+                  f"{os.environ.get('GITHUB_RUN_ID', '')}"
+              ),
           }
           if status == "succeeded":
               payload.update({
@@ -251,9 +265,14 @@ jobs:
                   "rom_version": os.environ["DZ_ROM_VERSION"],
                   "android_version": os.environ["DZ_ANDROID_VERSION"],
               })
+
           body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
           timestamp = str(int(time.time()))
-          signature = hmac.new(secret.encode(), f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
+          signature = hmac.new(
+              secret.encode(),
+              f"{timestamp}.{body}".encode(),
+              hashlib.sha256,
+          ).hexdigest()
           request = urllib.request.Request(
               callback,
               data=body.encode(),
@@ -262,7 +281,7 @@ jobs:
                   "Content-Type": "application/json",
                   "X-DeadZone-Timestamp": timestamp,
                   "X-DeadZone-Signature": f"sha256={signature}",
-                  "User-Agent": "DeadZone-Framework/1.0",
+                  "User-Agent": "DeadZone-Framework/1.1",
               },
           )
           try:
@@ -272,14 +291,62 @@ jobs:
           except Exception as exc:
               print(f"::warning::DeadZone callback failed: {exc}")
           PY
+
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 8 "DeadZone-Framework request accepted." || true
+
+      - name: 🔎 Verify shared credential can read Framework engine
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+        run: |
+          set -Eeuo pipefail
+
+          required_runtime=(
+            ENGINE_REPOSITORY
+            DEADZONE_ENGINE_REPOSITORY
+            RCLONE_REMOTE_NAME
+            RCLONE_UPLOAD_DIR
+            RCLONE_CONFIG_BASE64
+          )
+          for key in "${required_runtime[@]}"; do
+            [[ -n "${!key:-}" ]] || {
+              echo "::error::Central Framework runtime value is missing: ${key}"
+              exit 1
+            }
+          done
+
+          [[ "$ENGINE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "::error::Central Framework engine repository mapping is invalid."
+            exit 1
+          }
+          [[ "$ENGINE_REPOSITORY" == "${DEADZONE_ENGINE_REPOSITORY:-}" ]] || {
+            echo "::error::Central Framework engine mapping does not match the loaded runtime."
+            exit 1
+          }
+
+          status="$(
+            curl --silent --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${ENGINE_REPOSITORY}/contents/?ref=main"
+          )"
+
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Shared GH_TOKEN cannot read the private Framework engine repository (HTTP ${status}). Grant the existing shared DeadZone credential Contents: Read access to the mapped FrameworkPatcher repository; do not create a Framework-only token."
+            exit 1
+          fi
+
+          echo "✅ Shared DeadZone credential can read the Framework engine."
 
       - name: 📥 Checkout private FrameworkPatcher engine
         uses: actions/checkout@v5
         with:
           repository: ${{ steps.runtime.outputs.engine_repository }}
           ref: main
-          token: ${{ env.PRIVATE_REPO_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           path: engine
           fetch-depth: 1
           persist-credentials: false
@@ -296,21 +363,37 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates p7zip-full wget zip unzip python3 python3-pip rclone
-          python3 -m pip install --user --break-system-packages "gdown==5.2.0" "pyrofork==2.3.58" "tgcrypto>=1.2.5"
+          python3 -m pip install --user --break-system-packages \
+            "gdown==5.2.0" \
+            "pyrofork==2.3.58" \
+            "tgcrypto>=1.2.5"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          chmod +x engine/scripts/patcher_a13.sh engine/scripts/patcher_a14.sh engine/scripts/patcher_a15.sh engine/scripts/patcher_a16.sh
-          [[ -s engine/templates/framework-patcher-module/module.prop ]] || { echo "::error::Framework module template is missing"; exit 1; }
+
+          chmod +x \
+            engine/scripts/patcher_a13.sh \
+            engine/scripts/patcher_a14.sh \
+            engine/scripts/patcher_a15.sh \
+            engine/scripts/patcher_a16.sh
+          [[ -s engine/templates/framework-patcher-module/module.prop ]] || {
+            echo "::error::Framework module template is missing"
+            exit 1
+          }
+
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 18 "Private Framework engine loaded." || true
 
       - name: 🔧 Prepare and verify Apktool
         working-directory: engine
         run: |
           set -Eeuo pipefail
-          APKTOOL_URL=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['url'])")
-          APKTOOL_SHA=$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['sha256'])")
+
+          APKTOOL_URL="$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['url'])")"
+          APKTOOL_SHA="$(python3 -c "import json; print(json.load(open('tools/versions.lock'))['apktool']['sha256'])")"
           [[ -f tools/apktool.jar ]] || wget -q -O tools/apktool.jar "$APKTOOL_URL"
-          ACTUAL_SHA=$(sha256sum tools/apktool.jar | awk '{print $1}')
-          [[ "$ACTUAL_SHA" == "$APKTOOL_SHA" ]] || { echo "::error::apktool.jar SHA256 mismatch"; exit 1; }
+          ACTUAL_SHA="$(sha256sum tools/apktool.jar | awk '{print $1}')"
+          [[ "$ACTUAL_SHA" == "$APKTOOL_SHA" ]] || {
+            echo "::error::apktool.jar SHA256 mismatch"
+            exit 1
+          }
           echo "✅ apktool.jar verified"
 
       - name: 📥 Download Framework JARs from Telegram file IDs
@@ -319,6 +402,7 @@ jobs:
           TELEGRAM_FILES: ${{ inputs.telegram_files }}
         run: |
           set -Eeuo pipefail
+
           python3 - <<'PY'
           import asyncio
           import json
@@ -352,32 +436,40 @@ jobs:
                       file_id = file_map.get(key)
                       if not file_id:
                           continue
-                      if not isinstance(file_id, str) or not file_id.strip():
-                          raise RuntimeError(f"Invalid Telegram file ID: {name}")
                       target = pathlib.Path(name).resolve()
                       result = await app.download_media(file_id.strip(), file_name=str(target))
                       if not result or not target.is_file():
                           raise RuntimeError(f"Telegram file-ID download failed: {name}")
                       targets.append(target)
 
+                  if not targets:
+                      raise RuntimeError("No Framework JAR inputs were downloaded")
+
                   for target in targets:
                       size = target.stat().st_size
-                      if size < 1_500_000 or size > 120 * 1024 * 1024 or not zipfile.is_zipfile(target):
-                          raise RuntimeError(f"Invalid JAR input: {target.name}")
+                      if size < 1_500_000 or size > 120 * 1024 * 1024:
+                          raise RuntimeError(f"Invalid JAR size: {target.name}")
+                      if not zipfile.is_zipfile(target):
+                          raise RuntimeError(f"Invalid JAR archive: {target.name}")
                       print(f"✅ {target.name} validated ({size} bytes)")
               finally:
                   await app.stop()
 
           asyncio.run(main())
           PY
+
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 32 "Framework JAR inputs verified directly from Telegram." || true
 
       - name: 🚀 Run FrameworkPatcher engine
         working-directory: engine
         run: |
           set -Eeuo pipefail
+
           patcher="scripts/patcher_a${DZ_ANDROID_VERSION}.sh"
-          [[ -x "$patcher" ]] || { echo "::error::Missing patcher: $patcher"; exit 1; }
+          [[ -x "$patcher" ]] || {
+            echo "::error::Missing patcher: $patcher"
+            exit 1
+          }
 
           jar_flags=()
           [[ -f framework.jar ]] && jar_flags+=(--framework)
@@ -394,7 +486,10 @@ jobs:
               disable_secure_flag) feature_flags+=(--disable-secure-flag) ;;
               kaorios_toolbox) feature_flags+=(--kaorios-toolbox) ;;
               add_gboard) feature_flags+=(--add-gboard) ;;
-              *) echo "::error::Unsupported feature: $feature"; exit 1 ;;
+              *)
+                echo "::error::Unsupported feature: $feature"
+                exit 1
+                ;;
             esac
           done
 
@@ -407,6 +502,7 @@ jobs:
           echo "🚀 Android ${DZ_ANDROID_VERSION} / API ${DZ_API_LEVEL}"
           echo "📦 JAR flags: ${jar_flags[*]}"
           echo "✨ Features: ${feature_flags[*]}"
+
           bash "$patcher" \
             "$DZ_API_LEVEL" \
             "$DZ_DEVICE_NAME" \
@@ -414,6 +510,7 @@ jobs:
             "${jar_flags[@]}" \
             "${feature_flags[@]}" \
             2>&1 | tee -a deadzone-framework.log
+
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 68 "Framework patches completed." || true
 
       - name: 📦 Verify generated DeadZone module
@@ -421,19 +518,35 @@ jobs:
         working-directory: engine
         run: |
           set -Eeuo pipefail
-          mapfile -t outputs < <(find . -maxdepth 1 -type f -name 'Framework-Patcher-*.zip' -printf '%f\n' | sort)
-          [[ ${#outputs[@]} -eq 1 ]] || { echo "::error::Expected exactly one Framework module ZIP"; exit 1; }
+
+          mapfile -t outputs < <(
+            find . -maxdepth 1 -type f -name 'Framework-Patcher-*.zip' -printf '%f\n' | sort
+          )
+          [[ ${#outputs[@]} -eq 1 ]] || {
+            echo "::error::Expected exactly one Framework module ZIP"
+            exit 1
+          }
+
           zip_file="${outputs[0]}"
           unzip -t "$zip_file" >/dev/null
-          [[ -s build-manifest.json ]] || { echo "::error::build-manifest.json is missing"; exit 1; }
-          size=$(stat -c%s "$zip_file")
-          sha=$(sha256sum "$zip_file" | awk '{print $1}')
-          echo "zip_file=$zip_file" >> "$GITHUB_OUTPUT"
-          echo "size=$size" >> "$GITHUB_OUTPUT"
-          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
-          echo "DZ_ARTIFACT_NAME=$zip_file" >> "$GITHUB_ENV"
-          echo "DZ_ARTIFACT_SIZE=$size" >> "$GITHUB_ENV"
-          echo "DZ_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+          [[ -s build-manifest.json ]] || {
+            echo "::error::build-manifest.json is missing"
+            exit 1
+          }
+
+          size="$(stat -c%s "$zip_file")"
+          sha="$(sha256sum "$zip_file" | awk '{print $1}')"
+          {
+            echo "zip_file=$zip_file"
+            echo "size=$size"
+            echo "sha256=$sha"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "DZ_ARTIFACT_NAME=$zip_file"
+            echo "DZ_ARTIFACT_SIZE=$size"
+            echo "DZ_ARTIFACT_SHA256=$sha"
+          } >> "$GITHUB_ENV"
+
           echo "✅ Module verified: $zip_file"
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" running 78 "Framework module verified and ready for upload." || true
 
@@ -441,19 +554,27 @@ jobs:
         working-directory: engine
         run: |
           set -Eeuo pipefail
+
           config="$RUNNER_TEMP/deadzone-framework-rclone.conf"
           umask 077
           printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$config"
           chmod 600 "$config"
+
           base_dir="${RCLONE_UPLOAD_DIR#/}"
           base_dir="${base_dir%/}"
           request_dir="${DZ_REQUEST_ID:-manual-${GITHUB_RUN_ID}}"
           remote="${RCLONE_REMOTE_NAME}:${base_dir}/frameworkpatcher/${request_dir}/Android${DZ_ANDROID_VERSION}/${DZ_DEVICE_NAME}/${DZ_ARTIFACT_NAME}"
+
           rclone --config "$config" copyto "$DZ_ARTIFACT_NAME" "$remote" --transfers 1
           link="$(rclone --config "$config" link "$remote")"
-          [[ "$link" == https://* ]] || { echo "::error::Invalid DeadZone Cloud link"; exit 1; }
+          [[ "$link" == https://* ]] || {
+            echo "::error::Invalid DeadZone Cloud link"
+            exit 1
+          }
+
           echo "::add-mask::$link"
           echo "DZ_RESULT_URL=$link" >> "$GITHUB_ENV"
+
           python3 "$RUNNER_TEMP/deadzone-framework-event.py" uploading 90 "Framework module uploaded to DeadZone Cloud." || true
 
       - name: 🧾 Create result contract and Release metadata
@@ -461,6 +582,7 @@ jobs:
         working-directory: engine
         run: |
           set -Eeuo pipefail
+
           python3 - <<'PY'
           import json
           import os
@@ -571,4 +693,6 @@ jobs:
         if: always()
         run: |
           rm -rf runtime engine
-          rm -f "$RUNNER_TEMP/deadzone-framework-event.py" "$RUNNER_TEMP/deadzone-framework-rclone.conf"
+          rm -f \
+            "$RUNNER_TEMP/deadzone-framework-event.py" \
+            "$RUNNER_TEMP/deadzone-framework-rclone.conf"
