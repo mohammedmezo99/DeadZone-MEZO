@@ -1,0 +1,29 @@
+name: DeadZone Launcher CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - fix/reliable-terminal-events
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile launcher reporter
+        run: python3 -m py_compile scripts/report_build_event.py
+      - name: Test launcher reporter
+        run: python3 scripts/report_build_event.py --self-test
+      - name: Verify terminal hooks
+        run: |
+          set -Eeuo pipefail
+          grep -Fq 'scripts/report_build_event.py' .github/workflows/build.yml
+          grep -Fq 'scripts/report_build_event.py' .github/workflows/port.yml
+          grep -Fq 'Report failed Lite build' .github/workflows/build.yml
+          grep -Fq 'Report failed Port build' .github/workflows/port.yml
