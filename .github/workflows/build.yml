@@ -76,24 +76,6 @@ jobs:
             exit 1
           fi
 
-      - name: 💾 Maximize build space
-        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 512
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-
-      - name: 🧹 Clean unused runner packages
-        run: |
-          set -euo pipefail
-          docker image prune --all --force || true
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
-          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
-          sudo apt-get autoremove --purge -y || true
-          sudo apt-get clean
-
       - name: 📥 Checkout DeadZone launcher
         uses: actions/checkout@v4
         with:
@@ -157,6 +139,24 @@ jobs:
           printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
+
+      - name: 💾 Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: 🧹 Clean unused runner packages
+        run: |
+          set -euo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
 
       - name: 📦 Checkout private builder source
         uses: actions/checkout@v4
@@ -251,7 +251,20 @@ jobs:
       - name: ❌ Send failure notification
         if: failure()
         continue-on-error: true
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::warning::Terminal Lite event cannot be signed because the central event secret is unavailable.'
+            exit 0
+          }
           python3 scripts/report_build_event.py failed \
             --project lite \
             --message "DeadZone Lite ROM build failed."
@@ -259,7 +272,20 @@ jobs:
       - name: ⛔ Send cancellation notification
         if: cancelled()
         continue-on-error: true
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::warning::Terminal Lite event cannot be signed because the central event secret is unavailable.'
+            exit 0
+          }
           python3 scripts/report_build_event.py cancelled \
             --project lite \
             --message "DeadZone Lite ROM build cancelled."
