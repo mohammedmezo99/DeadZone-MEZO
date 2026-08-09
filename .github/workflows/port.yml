@@ -102,12 +102,6 @@ jobs:
           path: runtime
           fetch-depth: 1
           persist-credentials: false
-          sparse-checkout: |
-            projects.env
-            build.env
-            rclone.conf
-            load-build.sh
-          sparse-checkout-cone-mode: false
 
       - name: 🔑 Import Port runtime
         id: central
@@ -202,15 +196,26 @@ jobs:
         run: sudo -E bash packROM.sh
 
       - name: ☁️ Install central rclone config
-        working-directory: toolbuild
         shell: bash
         run: |
           set -Eeuo pipefail
-          [[ -s "$GITHUB_WORKSPACE/runtime/rclone.conf" ]] || {
-            echo "::error::DeadZone runtime rclone.conf is missing or empty"
+          SRC="$GITHUB_WORKSPACE/runtime/rclone.conf"
+          DST="$GITHUB_WORKSPACE/toolbuild/rclone.conf"
+
+          test -s "$SRC" || {
+            echo "::error::Central rclone config missing or empty: $SRC"
             exit 1
           }
-          install -m 600 "$GITHUB_WORKSPACE/runtime/rclone.conf" "$PWD/rclone.conf"
+
+          mkdir -p "$(dirname "$DST")"
+          install -m 600 "$SRC" "$DST"
+
+          test -s "$DST" || {
+            echo "::error::rclone config install failed: $DST"
+            exit 1
+          }
+
+          echo "✅ rclone config installed"
 
       - name: ☁️ Report upload phase
         working-directory: toolbuild
