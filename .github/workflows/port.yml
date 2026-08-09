@@ -228,17 +228,19 @@ jobs:
       - name: ❌ Report failed Port build
         if: failure()
         continue-on-error: true
-        working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py fail "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 scripts/report_build_event.py failed \
+            --project port \
+            --message "Port ROM build failed."
 
       - name: ⛔ Report cancelled Port build
         if: cancelled()
         continue-on-error: true
-        working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 scripts/report_build_event.py cancelled \
+            --project port \
+            --message "Port ROM build cancelled."
