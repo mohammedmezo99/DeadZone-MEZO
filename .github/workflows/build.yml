@@ -94,6 +94,12 @@ jobs:
           sudo apt-get autoremove --purge -y || true
           sudo apt-get clean
 
+      - name: 📥 Checkout DeadZone launcher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: 📥 Checkout private runtime
         uses: actions/checkout@v4
         with:
@@ -243,16 +249,20 @@ jobs:
           python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
       - name: ❌ Send failure notification
-        if: failure() && hashFiles('toolbuild/notify.py') != ''
-        working-directory: toolbuild
+        if: failure()
+        continue-on-error: true
         run: |
-          python3 notify.py fail "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 scripts/report_build_event.py failed \
+            --project lite \
+            --message "DeadZone Lite ROM build failed."
 
       - name: ⛔ Send cancellation notification
-        if: cancelled() && hashFiles('toolbuild/notify.py') != ''
-        working-directory: toolbuild
+        if: cancelled()
+        continue-on-error: true
         run: |
-          python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 scripts/report_build_event.py cancelled \
+            --project lite \
+            --message "DeadZone Lite ROM build cancelled."
 
       - name: 🧽 Remove private runtime files
         if: always()
