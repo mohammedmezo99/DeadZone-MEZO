@@ -1,0 +1,66 @@
+name: Reconcile Port Failure Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/reconcile-port-failure-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEADZONE_REQUEST_ID: port_a71c7444c959416fb98a
+      DEADZONE_CALLBACK_URL: https://deadzone-bot.mezo-deadzone-lite.workers.dev/build/events
+      DEADZONE_PROJECT: port
+      DEADZONE_RUN_ID_OVERRIDE: "31315940452"
+      DEADZONE_RUN_URL_OVERRIDE: https://github.com/mohammedmezo99/DeadZone-MEZO/actions/runs/31315940452
+
+    steps:
+      - name: Checkout DeadZone launcher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Self-test terminal reporter
+        run: python3 scripts/report_build_event.py --self-test
+
+      - name: Load central runtime
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          token: ${{ secrets.GH_TOKEN }}
+          ref: main
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Import Port runtime
+        env:
+          DEADZONE_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash runtime/load-build.sh port
+
+      - name: Reconcile failed Port request
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo 'Missing BUILD_PROGRESS_SECRET from central runtime.' >&2
+            exit 1
+          }
+          python3 scripts/report_build_event.py failed \
+            --project port \
+            --message "Private Port engine checkout failed."
+          echo 'PORT_FAILURE_RECONCILED=1'
