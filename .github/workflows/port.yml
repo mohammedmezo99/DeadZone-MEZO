@@ -206,6 +206,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          [[ -s "$GITHUB_WORKSPACE/runtime/rclone.conf" ]] || {
+            echo "::error::DeadZone runtime rclone.conf is missing or empty"
+            exit 1
+          }
           install -m 600 "$GITHUB_WORKSPACE/runtime/rclone.conf" "$PWD/rclone.conf"
 
       - name: ☁️ Report upload phase
@@ -229,7 +233,6 @@ jobs:
 
       - name: ❌ Report failed Port build
         if: failure()
-        continue-on-error: true
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -241,8 +244,8 @@ jobs:
             export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
           fi
           [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
-            echo '::warning::Terminal Port event cannot be signed because the central event secret is unavailable.'
-            exit 0
+            echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            exit 1
           }
           python3 scripts/report_build_event.py failed \
             --project port \
@@ -250,7 +253,6 @@ jobs:
 
       - name: ⛔ Report cancelled Port build
         if: cancelled()
-        continue-on-error: true
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -262,8 +264,8 @@ jobs:
             export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
           fi
           [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
-            echo '::warning::Terminal Port event cannot be signed because the central event secret is unavailable.'
-            exit 0
+            echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            exit 1
           }
           python3 scripts/report_build_event.py cancelled \
             --project port \

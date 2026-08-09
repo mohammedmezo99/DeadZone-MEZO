@@ -24,6 +24,7 @@ TERMINAL_STATUSES = {
 
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$")
 REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,99}$")
+DEFAULT_ATTEMPTS = 4
 
 
 def _first_env(runtime: Mapping[str, str], *names: str) -> str:
@@ -139,6 +140,7 @@ def post_terminal_event(
     payload: Mapping[str, object],
     *,
     env: Mapping[str, str] | None = None,
+    attempts: int = DEFAULT_ATTEMPTS,
 ) -> int:
     runtime = os.environ if env is None else env
     callback_url = _first_env(runtime, "DEADZONE_CALLBACK_URL", "DZ_CALLBACK_URL")
@@ -150,23 +152,46 @@ def post_terminal_event(
     )
     target = _safe_https(callback_url, "callback_url")
     body = serialize_event(payload)
-    timestamp = str(int(time.time()))
-    request = Request(
-        target,
-        data=body.encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-DeadZone-Timestamp": timestamp,
-            "X-DeadZone-Signature": sign_event(secret, timestamp, body),
-            "User-Agent": "DeadZone-MEZO/terminal-reporter",
-        },
-    )
-    with urlopen(request, timeout=20) as response:
-        response_status = int(getattr(response, "status", response.getcode()))
-        if response_status not in {200, 202}:
-            raise RuntimeError(f"DeadZone callback failed with HTTP {response_status}")
-        return response_status
+    if attempts < 1 or attempts > 8:
+        raise ValueError("attempts must be between 1 and 8")
+
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        timestamp = str(int(time.time()))
+        request = Request(
+            target,
+            data=body.encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-DeadZone-Timestamp": timestamp,
+                "X-DeadZone-Signature": sign_event(secret, timestamp, body),
+                "User-Agent": "DeadZone-MEZO/terminal-reporter",
+            },
+        )
+        try:
+            with urlopen(request, timeout=20) as response:
+                response_status = int(getattr(response, "status", response.getcode()))
+                if response_status not in {200, 202}:
+                    raise RuntimeError(
+                        f"DeadZone callback failed with HTTP {response_status}"
+                    )
+                return response_status
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            delay = min(2 ** (attempt - 1), 4)
+            print(
+                f"DeadZone terminal reporter retry {attempt}/{attempts} after: {exc}",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+    assert last_error is not None
+    raise RuntimeError(
+        f"DeadZone terminal callback failed after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
 def run_self_test() -> int:
@@ -199,6 +224,14 @@ def run_self_test() -> int:
         hashlib.sha256,
     ).hexdigest()
     assert sign_event("secret", "1700000000", body) == f"sha256={expected}"
+
+    try:
+        post_terminal_event(payload, env={}, attempts=0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid retry attempts must be rejected")
+
     print("DeadZone terminal reporter self-test: OK")
     return 0
 
