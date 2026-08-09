@@ -132,6 +132,10 @@ jobs:
               exit 1
             fi
           done
+          if [[ "$ENGINE_REPOSITORY" != "mohammedmezo99/DeadZone-xiaomi_Lite" ]]; then
+            echo "::error::Unexpected Lite engine: $ENGINE_REPOSITORY"
+            exit 1
+          fi
           if [[ "$ENGINE_REPOSITORY" != "$DEADZONE_ENGINE_REPOSITORY" ]]; then
             echo "::error::Runtime engine output does not match the loaded project map"
             exit 1
@@ -173,7 +177,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -201,7 +205,7 @@ jobs:
           set -euo pipefail
           source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
           target_file="$PWD/rclone.conf"
-          configured_remote="$(sed -n 's/^\[\([^]]\+\)\]$/\1/p' "$source_file" | head -n 1)"
+          configured_remote="$(awk '/^\[[^]]+\]$/ { name=$0; sub(/^\[/, "", name); sub(/\]$/, "", name); print name; exit }' "$source_file")"
 
           if [[ -z "$configured_remote" ]]; then
             echo "::error::Central rclone.conf does not define a remote"
@@ -219,34 +223,34 @@ jobs:
             exit 1
           fi
 
-          rclone version | head -n 1
+          rclone version
           echo "Rclone configuration installed for remote: ${RCLONE_REMOTE_NAME}"
 
       - name: 🚀 Build ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          sudo -E bash build.sh "${{ inputs.input_url }}" "${{ github.repository }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}" 2>&1 | tee build_action.log
+          sudo -E bash build.sh "${{ inputs.input_url }}" "${{ github.repository }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}" 2>&1 | tee build_action.log
 
       - name: 📦 Pack ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py pack "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py pack "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
       - name: ⬆️ Upload ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py upload "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py upload "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
           sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
 
       - name: ✅ Send success notification
         if: success()
         working-directory: toolbuild
         run: |
-          python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "mezo" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
 
       - name: ❌ Send failure notification
         if: failure()
