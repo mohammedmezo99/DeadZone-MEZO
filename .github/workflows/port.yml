@@ -87,16 +87,6 @@ jobs:
             exit 1
           }
 
-      - name: ⚡ Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 512
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-docker-images: "true"
-
       - name: 📥 Checkout DeadZone launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -137,6 +127,18 @@ jobs:
             echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
             exit 1
           }
+          echo "::add-mask::$BUILD_PROGRESS_SECRET"
+          echo "DEADZONE_EVENT_SECRET=$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+
+      - name: ⚡ Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
 
       - name: 📥 Checkout private Port engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -228,9 +230,20 @@ jobs:
       - name: ❌ Report failed Port build
         if: failure()
         continue-on-error: true
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::warning::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            exit 0
+          }
           python3 scripts/report_build_event.py failed \
             --project port \
             --message "Port ROM build failed."
@@ -238,9 +251,20 @@ jobs:
       - name: ⛔ Report cancelled Port build
         if: cancelled()
         continue-on-error: true
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::warning::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            exit 0
+          }
           python3 scripts/report_build_event.py cancelled \
             --project port \
             --message "Port ROM build cancelled."
