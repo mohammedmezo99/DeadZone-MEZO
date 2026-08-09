@@ -1,0 +1,244 @@
+name: MEZO-Port
+run-name: 🔂 MEZO-Port build by ${{ inputs.builder_name || github.actor }}
+
+concurrency:
+  group: mezo-port-build-queue
+  queue: max
+
+on:
+  workflow_dispatch:
+    inputs:
+      stock_rom_url:
+        description: Stock ROM HTTPS URL
+        required: true
+        type: string
+      port_rom_url:
+        description: Port ROM HTTPS URL
+        required: true
+        type: string
+      builder_name:
+        description: Telegram builder name
+        required: false
+        type: string
+      builder_id:
+        description: Telegram builder ID
+        required: true
+        type: string
+      request_id:
+        description: DeadZone Port build request ID
+        required: true
+        type: string
+      callback_url:
+        description: Signed DeadZone build-event endpoint
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 🔂 Build DeadZone Port
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DEADZONE_REQUEST_ID: ${{ inputs.request_id }}
+      DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+      DEADZONE_PROJECT: port
+      DEADZONE_CONTROLLED_BUILD: "1"
+
+    steps:
+      - name: 🔐 Validate Port request
+        shell: python
+        env:
+          STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
+          PORT_ROM_URL: ${{ inputs.port_rom_url }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+        run: |
+          import os
+          import re
+          from urllib.parse import urlparse
+
+          request_id = os.environ["REQUEST_ID"].strip()
+          if not re.fullmatch(r"port_[A-Za-z0-9]{8,80}", request_id):
+              raise SystemExit("Invalid DeadZone Port request ID")
+
+          for name in ("STOCK_ROM_URL", "PORT_ROM_URL", "CALLBACK_URL"):
+              value = os.environ[name].strip()
+              parsed = urlparse(value)
+              if (
+                  parsed.scheme != "https"
+                  or not parsed.hostname
+                  or parsed.username
+                  or parsed.password
+                  or len(value) > 2048
+              ):
+                  raise SystemExit(f"{name} must be a safe HTTPS URL")
+
+      - name: 🔐 Validate runtime bootstrap token
+        shell: bash
+        env:
+          DEADZONE_RUNTIME_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${DEADZONE_RUNTIME_TOKEN:-}" ]] || {
+            echo 'GH_TOKEN is required to read DeadZone-File.' >&2
+            exit 1
+          }
+
+      - name: ⚡ Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
+      - name: 📥 Checkout DeadZone launcher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: 🔐 Load DeadZone central runtime
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          token: ${{ secrets.GH_TOKEN }}
+          ref: main
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+          sparse-checkout-cone-mode: false
+
+      - name: 🔑 Import Port runtime
+        id: central
+        shell: bash
+        env:
+          DEADZONE_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash runtime/load-build.sh port
+
+      - name: 🛡️ Validate Port engine runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for key in DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR BUILD_PROGRESS_SECRET; do
+            [[ -n "${!key:-}" ]] || { echo "Missing runtime value: $key" >&2; exit 1; }
+          done
+          [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-xiaomi_Port" ]] || {
+            echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
+            exit 1
+          }
+
+      - name: 📥 Checkout private Port engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ steps.central.outputs.engine_repository }}
+          token: ${{ env.PRIVATE_REPO_TOKEN }}
+          ref: main
+          path: toolbuild
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: 📡 Report queued Port build
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py start "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: 🕒 Set Cairo timezone
+        run: sudo timedatectl set-timezone Africa/Cairo
+
+      - name: ☕ Prepare Java 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 🧰 Install Port dependencies
+        working-directory: toolbuild
+        run: sudo bash setup.sh
+
+      - name: 🔧 Give Port tools permission
+        working-directory: toolbuild
+        run: sudo chmod 777 -R .
+
+      - name: 🔂 Build Stock + Port ROM
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+          STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
+          PORT_ROM_URL: ${{ inputs.port_rom_url }}
+        run: |
+          sudo -E bash build.sh \
+            "$STOCK_ROM_URL" \
+            "$PORT_ROM_URL" \
+            "${{ github.repository }}" \
+            port \
+            "${{ inputs.builder_name }}" \
+            "${{ inputs.builder_id }}"
+
+      - name: 📦 Report packing phase
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py pack "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: 📦 Pack Port ROM
+        working-directory: toolbuild
+        run: sudo -E bash packROM.sh
+
+      - name: ☁️ Install central rclone config
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          install -m 600 "$GITHUB_WORKSPACE/runtime/rclone.conf" "$PWD/rclone.conf"
+
+      - name: ☁️ Report upload phase
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py upload "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: ☁️ Upload DeadZone Port
+        working-directory: toolbuild
+        run: sudo -E bash bin/port/uploadROM.sh
+
+      - name: ✅ Report successful Port build
+        if: success()
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py success "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: ❌ Report failed Port build
+        if: failure()
+        continue-on-error: true
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py fail "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+
+      - name: ⛔ Report cancelled Port build
+        if: cancelled()
+        continue-on-error: true
+        working-directory: toolbuild
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 notify.py cancelled "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
