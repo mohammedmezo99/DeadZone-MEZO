@@ -23,7 +23,9 @@ jobs:
       - name: Verify terminal hooks
         run: |
           set -Eeuo pipefail
-          grep -Fq 'scripts/report_build_event.py' .github/workflows/build.yml
-          grep -Fq 'scripts/report_build_event.py' .github/workflows/port.yml
-          grep -Fq 'Report failed Lite build' .github/workflows/build.yml
-          grep -Fq 'Report failed Port build' .github/workflows/port.yml
+          grep -Fq 'python3 scripts/report_build_event.py failed' .github/workflows/build.yml
+          grep -Fq 'python3 scripts/report_build_event.py cancelled' .github/workflows/build.yml
+          grep -Fq 'python3 scripts/report_build_event.py failed' .github/workflows/port.yml
+          grep -Fq 'python3 scripts/report_build_event.py cancelled' .github/workflows/port.yml
+          ! grep -A2 -F 'Send failure notification' .github/workflows/build.yml | grep -Fq 'continue-on-error: true'
+          ! grep -A2 -F 'Report failed Port build' .github/workflows/port.yml | grep -Fq 'continue-on-error: true'
