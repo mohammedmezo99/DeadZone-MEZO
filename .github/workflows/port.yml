@@ -252,7 +252,7 @@ jobs:
             echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
-          python3 scripts/report_build_event.py failed \
+          python3 runtime/report_build_event.py failed \
             --project port \
             --message "Port ROM build failed."
 
@@ -272,6 +272,6 @@ jobs:
             echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
-          python3 scripts/report_build_event.py cancelled \
+          python3 runtime/report_build_event.py cancelled \
             --project port \
             --message "Port ROM build cancelled."
