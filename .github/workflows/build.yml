@@ -96,6 +96,7 @@ jobs:
             build.env
             rclone.conf
             load-build.sh
+            report_build_event.py
           sparse-checkout-cone-mode: false
 
       - name: ⚙️ Load central runtime
@@ -105,7 +106,7 @@ jobs:
           DEADZONE_CONTROLLED_BUILD: "1"
         run: |
           set -euo pipefail
-          for runtime_file in projects.env build.env rclone.conf load-build.sh; do
+          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py; do
             if [[ ! -s "runtime/${runtime_file}" ]]; then
               echo "::error::Central runtime file is missing or empty: ${runtime_file}"
               exit 1
@@ -205,21 +206,22 @@ jobs:
           set -euo pipefail
           source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
           target_file="$PWD/rclone.conf"
-          configured_remote="$(awk '/^\[[^]]+\]$/ { name=$0; sub(/^\[/, "", name); sub(/\]$/, "", name); print name; exit }' "$source_file")"
 
-          if [[ -z "$configured_remote" ]]; then
-            echo "::error::Central rclone.conf does not define a remote"
-            exit 1
-          fi
-          if [[ "$configured_remote" != "$RCLONE_REMOTE_NAME" ]]; then
-            echo "::error::Rclone remote metadata does not match rclone.conf"
+          if [[ ! -s "$source_file" ]]; then
+            echo "::error::Central rclone.conf is missing or empty"
             exit 1
           fi
 
           install -m 600 "$source_file" "$target_file"
 
           if ! command -v rclone >/dev/null 2>&1; then
-            echo "::error::rclone is missing after builder setup"
+            echo "rclone was not installed by builder setup; installing fallback package"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone
+          fi
+
+          if ! rclone --config="$target_file" listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
+            echo "::error::Central rclone.conf does not define expected remote: ${RCLONE_REMOTE_NAME}"
             exit 1
           fi
 
@@ -268,7 +270,7 @@ jobs:
             echo '::error::Terminal Lite event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
-          python3 scripts/report_build_event.py failed \
+          python3 runtime/report_build_event.py failed \
             --project lite \
             --message "DeadZone Lite ROM build failed."
 
@@ -288,7 +290,7 @@ jobs:
             echo '::error::Terminal Lite event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
-          python3 scripts/report_build_event.py cancelled \
+          python3 runtime/report_build_event.py cancelled \
             --project lite \
             --message "DeadZone Lite ROM build cancelled."
 
