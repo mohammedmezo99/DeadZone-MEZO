@@ -3,14 +3,13 @@ name: One-shot Framework queue patch
 on:
   push:
     paths:
-      - .github/workflows/one-shot-framework-queue.yml
+      - '.github/workflows/one-shot-framework-queue.yml'
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.event.head_commit.message == 'chore: install Framework queue patch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
@@ -24,10 +23,9 @@ jobs:
           git checkout -B main FETCH_HEAD
 
       - name: Apply Framework queue contract
-        shell: python
         run: |
+          python3 - <<'PY'
           from pathlib import Path
-
           path = Path('.github/workflows/framework.yml')
           source = path.read_text(encoding='utf-8')
           old = "concurrency:\n  group: deadzone-framework-build-queue\n  cancel-in-progress: false"
@@ -35,6 +33,7 @@ jobs:
           if source.count(old) != 1:
               raise SystemExit('Framework concurrency block did not match exactly once')
           path.write_text(source.replace(old, new), encoding='utf-8')
+          PY
 
       - name: Commit main
         run: |
