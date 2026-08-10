@@ -127,6 +127,7 @@ jobs:
       - name: ⚡ Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
+          build-mount-path: ${{ github.workspace }}/toolbuild
           swap-size-mb: 1024
           root-reserve-mb: 512
           remove-dotnet: "true"
@@ -163,7 +164,9 @@ jobs:
 
       - name: 🧰 Install Port dependencies
         working-directory: toolbuild
-        run: sudo bash setup.sh
+        run: |
+          set -Eeuo pipefail
+          sudo bash -Ee -o pipefail setup.sh
 
       - name: 🔧 Give Port tools permission
         working-directory: toolbuild
