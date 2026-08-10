@@ -4,7 +4,7 @@ run-name: 🧩 DeadZone-Framework  ${{ inputs.request_id || github.run_id }}
 
 concurrency:
   group: deadzone-framework-build-queue
-  cancel-in-progress: false
+  queue: max
 
 on:
   workflow_dispatch:
