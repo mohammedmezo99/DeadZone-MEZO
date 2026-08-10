@@ -1,6 +1,6 @@
 name: MEZO-Lite
 
-run-name: 🚀 MEZO-Lite build by ${{ inputs.builder_name || github.actor }}
+run-name: 🚀 MEZO-Lite · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
 concurrency:
   group: mezo-lite-build-queue
@@ -144,6 +144,14 @@ jobs:
           printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
+
+      - name: 📡 Correlate accepted Lite request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runtime/report_build_event.py running \
+            --project lite \
+            --message "DeadZone Lite request accepted by GitHub Actions." || true
 
       - name: 💾 Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c

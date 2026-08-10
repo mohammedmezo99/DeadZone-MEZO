@@ -1,5 +1,5 @@
 name: MEZO-Port
-run-name: 🔂 MEZO-Port build by ${{ inputs.builder_name || github.actor }}
+run-name: 🔂 MEZO-Port · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
 concurrency:
   group: mezo-port-build-queue
@@ -123,6 +123,14 @@ jobs:
           }
           echo "::add-mask::$BUILD_PROGRESS_SECRET"
           echo "DEADZONE_EVENT_SECRET=$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+
+      - name: 📡 Correlate accepted Port request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runtime/report_build_event.py running \
+            --project port \
+            --message "DeadZone Port request accepted by GitHub Actions." || true
 
       - name: ⚡ Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
