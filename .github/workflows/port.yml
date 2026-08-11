@@ -46,6 +46,11 @@ jobs:
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
       DEADZONE_PROJECT: port
       DEADZONE_CONTROLLED_BUILD: "1"
+      DEADZONE_STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
+      DEADZONE_PORT_ROM_URL: ${{ inputs.port_rom_url }}
+      DEADZONE_BUILDER_NAME: ${{ inputs.builder_name }}
+      DEADZONE_BUILDER_ID: ${{ inputs.builder_id }}
+      DEADZONE_SOURCE_REPOSITORY: ${{ github.repository }}
 
     steps:
       - name: 🔐 Validate Port request
@@ -159,7 +164,7 @@ jobs:
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py start "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -178,29 +183,27 @@ jobs:
 
       - name: 🔧 Give Port tools permission
         working-directory: toolbuild
-        run: sudo chmod 777 -R .
+        run: chmod -R u+rwX,go+rX .
 
       - name: 🔂 Build Stock + Port ROM
         working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
-          STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
-          PORT_ROM_URL: ${{ inputs.port_rom_url }}
         run: |
           sudo -E bash build.sh \
-            "$STOCK_ROM_URL" \
-            "$PORT_ROM_URL" \
-            "${{ github.repository }}" \
+            "$DEADZONE_STOCK_ROM_URL" \
+            "$DEADZONE_PORT_ROM_URL" \
+            "$DEADZONE_SOURCE_REPOSITORY" \
             port \
-            "${{ inputs.builder_name }}" \
-            "${{ inputs.builder_id }}"
+            "$DEADZONE_BUILDER_NAME" \
+            "$DEADZONE_BUILDER_ID"
 
       - name: 📦 Report packing phase
         working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py pack "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: 📦 Pack Port ROM
         working-directory: toolbuild
@@ -233,7 +236,7 @@ jobs:
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py upload "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: ☁️ Upload DeadZone Port
         working-directory: toolbuild
@@ -245,7 +248,7 @@ jobs:
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py success "${{ github.repository }}" "${{ inputs.stock_rom_url }}" port "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: ❌ Report failed Port build
         if: failure()
