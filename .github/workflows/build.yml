@@ -43,6 +43,10 @@ jobs:
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
       DEADZONE_PROJECT: lite
       DEADZONE_CONTROLLED_BUILD: "1"
+      DEADZONE_INPUT_URL: ${{ inputs.input_url }}
+      DEADZONE_BUILDER_NAME: ${{ inputs.builder_name }}
+      DEADZONE_BUILDER_ID: ${{ inputs.builder_id }}
+      DEADZONE_SOURCE_REPOSITORY: ${{ github.repository }}
 
     steps:
       - name: 🧾 Validate controlled request
@@ -187,7 +191,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py start "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -241,27 +245,27 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          sudo -E bash build.sh "${{ inputs.input_url }}" "${{ github.repository }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}" 2>&1 | tee build_action.log
+          sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log
 
       - name: 📦 Pack ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py pack "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
       - name: ⬆️ Upload ROM
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py upload "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
           sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
 
       - name: ✅ Send success notification
         if: success()
         working-directory: toolbuild
         run: |
-          python3 notify.py success "${{ github.repository }}" "${{ inputs.input_url }}" "lite" "${{ inputs.builder_name }}" "${{ inputs.builder_id }}"
+          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
       - name: ❌ Send failure notification
         if: failure()
