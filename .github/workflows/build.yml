@@ -70,15 +70,20 @@ jobs:
               if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                   raise SystemExit(f"{name} must be a safe HTTPS URL")
 
-      - name: 🔐 Validate launcher credential
+      - name: 🔐 Validate launcher credentials
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
           set -euo pipefail
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::Missing required repository secret: GH_TOKEN"
-            exit 1
-          fi
+          required=(GH_TOKEN SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Missing required repository secret: ${variable_name}"
+              exit 1
+            fi
+          done
 
       - name: 📥 Checkout DeadZone launcher
         uses: actions/checkout@v4
@@ -101,6 +106,8 @@ jobs:
             rclone.conf
             load-build.sh
             report_build_event.py
+            upload.env
+            upload-mirrors.sh
           sparse-checkout-cone-mode: false
 
       - name: ⚙️ Load central runtime
@@ -110,13 +117,13 @@ jobs:
           DEADZONE_CONTROLLED_BUILD: "1"
         run: |
           set -euo pipefail
-          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py; do
+          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py upload.env upload-mirrors.sh; do
             if [[ ! -s "runtime/${runtime_file}" ]]; then
               echo "::error::Central runtime file is missing or empty: ${runtime_file}"
               exit 1
             fi
           done
-          chmod 700 runtime/load-build.sh
+          chmod 700 runtime/load-build.sh runtime/upload-mirrors.sh
           runtime/load-build.sh lite
 
       - name: ✅ Validate loaded runtime
@@ -254,12 +261,115 @@ jobs:
           python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
-      - name: ⬆️ Upload ROM
+      - name: ⬆️ Upload ROM mirrors
         working-directory: toolbuild
+        env:
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
-          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+
+          set -a
+          # shellcheck disable=SC1091
+          source "$GITHUB_WORKSPACE/runtime/upload.env"
+          set +a
+
+          required_mirror_values=(SOURCEFORGE_USERNAME SOURCEFORGE_PROJECT SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required_mirror_values[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Mirror runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+
+          missing_packages=0
+          for command_name in rsync sftp ssh-keyscan ssh-keygen curl; do
+            command -v "$command_name" >/dev/null 2>&1 || missing_packages=1
+          done
+          if (( missing_packages != 0 )); then
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rsync openssh-client curl
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("uploadROM.sh")
+          text = path.read_text(encoding="utf-8")
+          old = '''upload "Clean Workflow.."
+          rm -rf "$work_dir/out"
+          rm -rf "$work_dir/build"
+
+          upload "Build $final_name successful!"'''
+          new = '''upload "Clean Workflow.."
+          if [[ "${DEADZONE_DEFER_CLEANUP:-0}" != "1" ]]; then
+              rm -rf "$work_dir/out"
+              rm -rf "$work_dir/build"
+          else
+              upload "Cleanup deferred for secondary mirrors"
+          fi
+
+          upload "Build $final_name successful!"'''
+          if text.count(old) != 1:
+              raise SystemExit("uploadROM.sh cleanup contract changed; refusing unsafe runtime patch")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
+          set +e
+          DEADZONE_DEFER_CLEANUP=1 sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+          google_status=${PIPESTATUS[0]}
+          set -e
+
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Lite_*.zip' -print 2>/dev/null)
+          if (( ${#final_zips[@]} != 1 )); then
+            echo "::error::Expected exactly one preserved final Lite ZIP; found ${#final_zips[@]}"
+            sudo rm -rf "$PWD/out" "$PWD/build"
+            exit 1
+          fi
+
+          final_zip="${final_zips[0]}"
+          final_name="$(basename "$final_zip")"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
+          if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
+            os_folder="${BASH_REMATCH[1]}"
+          elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
+            os_folder="MIUI${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unable to derive mirror OS folder from ROM version: ${rom_version}"
+            sudo rm -rf "$PWD/out" "$PWD/build"
+            exit 1
+          fi
+
+          if (( google_status == 0 )); then
+            drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/Lite/${codename}/${os_folder}/${final_name}"
+            drive_url="$(rclone --config="$PWD/rclone.conf" link "$drive_remote" 2>/dev/null | tail -n1 | tr -d '\r' || true)"
+            if [[ -n "$drive_url" ]]; then
+              printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\n' "$drive_url" >> "$GITHUB_ENV"
+            fi
+            export DEADZONE_SET_RESULT_URL=0
+          else
+            echo "::warning::Google Drive upload did not complete; secondary mirrors will be allowed to rescue the release"
+            export DEADZONE_SET_RESULT_URL=1
+          fi
+
+          set +e
+          bash "$GITHUB_WORKSPACE/runtime/upload-mirrors.sh" \
+            "Lite" "$codename" "$os_folder" "$final_zip" "$final_name" \
+            2>&1 | tee -a build_action.log
+          mirror_status=${PIPESTATUS[0]}
+          set -e
+
+          sudo rm -rf "$PWD/out" "$PWD/build"
+
+          if (( google_status != 0 && mirror_status != 0 )); then
+            echo "::error::Google Drive and all secondary ROM mirrors failed"
+            exit 1
+          fi
+          if (( mirror_status != 0 )); then
+            echo "::warning::Secondary mirrors failed, but Google Drive upload succeeded"
+          fi
 
       - name: ✅ Send success notification
         if: success()
