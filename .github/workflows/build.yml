@@ -1,13 +1,7 @@
-name: MEZO-Lite
-
-run-name: 🚀 MEZO-Lite · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
-
-concurrency:
-  group: mezo-lite-build-queue
-  queue: max
+name: MEZO-Lite Core
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       input_url:
         description: 📥 ROM download URL
@@ -29,6 +23,13 @@ on:
         description: 🔗 Signed DeadZone build-event endpoint
         required: true
         type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+      SOURCEFORGE_SSH_PRIVATE_KEY:
+        required: true
+      PIXELDRAIN_API_KEY:
+        required: true
 
 permissions:
   contents: read
