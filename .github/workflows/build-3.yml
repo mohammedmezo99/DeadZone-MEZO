@@ -36,7 +36,7 @@ permissions:
 jobs:
   build:
     name: 🛠️ Lite Worker 3
-    uses: ./.github/workflows/build.yml
+    uses: ./.github/workflows/lite-core.yml
     with:
       input_url: ${{ inputs.input_url }}
       builder_name: ${{ inputs.builder_name }}
