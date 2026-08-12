@@ -1,0 +1,46 @@
+name: MEZO-Lite 1
+
+run-name: 🚀 MEZO-Lite 1 · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
+
+concurrency:
+  group: mezo-lite-build-1
+  queue: max
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_url:
+        description: 📥 ROM download URL
+        required: true
+        type: string
+      builder_name:
+        description: 👤 Builder name
+        required: false
+        type: string
+      builder_id:
+        description: 💬 Telegram user ID
+        required: false
+        type: string
+      request_id:
+        description: 🆔 DeadZone controlled build request ID
+        required: true
+        type: string
+      callback_url:
+        description: 🔗 Signed DeadZone build-event endpoint
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 🛠️ Lite Worker 1
+    uses: ./.github/workflows/build.yml
+    with:
+      input_url: ${{ inputs.input_url }}
+      builder_name: ${{ inputs.builder_name }}
+      builder_id: ${{ inputs.builder_id }}
+      request_id: ${{ inputs.request_id }}
+      callback_url: ${{ inputs.callback_url }}
+    secrets: inherit
