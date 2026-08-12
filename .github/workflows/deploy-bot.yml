@@ -1,0 +1,323 @@
+name: Deploy DeadZone Bot
+
+run-name: 🚀 Deploy DeadZone Bot · ${{ github.actor }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deadzone-bot-cloudflare-production
+  cancel-in-progress: false
+
+env:
+  BOT_REPOSITORY: mohammedmezo99/DeadZone-Bot
+  RUNTIME_REPOSITORY: mohammedmezo99/DeadZone-File
+  WORKER_NAME: deadzone-bot
+  D1_NAME: deadzone-bot
+  QUEUE_NAME: deadzone-build-events
+  WRANGLER_VERSION: "4.114.0"
+
+jobs:
+  deploy:
+    name: ☁️ Deploy bot to Cloudflare
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: bot/cloudflare
+
+    steps:
+      - name: 🔐 Validate private repository token
+        working-directory: ${{ github.workspace }}
+        env:
+          DEADZONE_GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${DEADZONE_GH_TOKEN:-}" ]] || {
+            echo '::error::Missing GH_TOKEN secret in DeadZone-MEZO.'
+            exit 1
+          }
+
+      - name: 📥 Checkout private DeadZone Bot
+        working-directory: ${{ github.workspace }}
+        env:
+          DEADZONE_GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          bot_dir="$GITHUB_WORKSPACE/bot"
+          rm -rf "$bot_dir"
+          git init "$bot_dir"
+          git -C "$bot_dir" remote add origin "https://github.com/${BOT_REPOSITORY}.git"
+          auth_header="$(printf 'x-access-token:%s' "$DEADZONE_GH_TOKEN" | base64 -w0)"
+          git -C "$bot_dir" \
+            -c "http.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --no-tags --prune --depth=1 origin refs/heads/main
+          git -C "$bot_dir" checkout --detach FETCH_HEAD
+          test -s "$bot_dir/cloudflare/package.json"
+          echo "Bot commit: $(git -C "$bot_dir" rev-parse --short=12 HEAD)"
+
+      - name: 🔒 Checkout private bot runtime
+        working-directory: ${{ github.workspace }}
+        env:
+          DEADZONE_GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$GITHUB_WORKSPACE/.deadzone-runtime"
+          rm -rf "$runtime_dir"
+          git init "$runtime_dir"
+          git -C "$runtime_dir" remote add origin "https://github.com/${RUNTIME_REPOSITORY}.git"
+          git -C "$runtime_dir" sparse-checkout init --no-cone
+          printf 'bot.env\n' | git -C "$runtime_dir" sparse-checkout set --stdin
+          auth_header="$(printf 'x-access-token:%s' "$DEADZONE_GH_TOKEN" | base64 -w0)"
+          git -C "$runtime_dir" \
+            -c "http.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --no-tags --prune --depth=1 origin refs/heads/main
+          git -C "$runtime_dir" checkout --detach FETCH_HEAD
+          test -s "$runtime_dir/bot.env"
+
+      - name: 🟢 Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bot/cloudflare/package-lock.json
+
+      - name: 🔐 Import masked deployment runtime
+        run: |
+          set -Eeuo pipefail
+          node scripts/import-runtime-env.mjs \
+            --source "$GITHUB_WORKSPACE/.deadzone-runtime/bot.env" \
+            --github-env "$GITHUB_ENV"
+
+      - name: 🧹 Remove private runtime checkout
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: rm -rf "$GITHUB_WORKSPACE/.deadzone-runtime"
+
+      - name: 📦 Install project metadata
+        run: npm ci
+
+      - name: ✨ Verify Premium emoji catalog
+        run: npm run emoji:verify:animated
+
+      - name: 🧪 Typecheck
+        run: npm run typecheck
+
+      - name: ✅ Run tests
+        run: npm test
+
+      - name: 🗄️ Apply D1 migrations locally
+        run: npm run d1:local
+
+      - name: 🔎 Validate Worker bundle
+        run: npm run deploy:dry-run
+
+      - name: 🆔 Resolve D1 database
+        id: d1
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -Eeuo pipefail
+          resolve_database_id() {
+            npx --yes "wrangler@${WRANGLER_VERSION}" d1 list --json |
+              jq -r --arg name "$D1_NAME" '
+                def rows:
+                  if type == "array" then .
+                  elif (.result | type) == "array" then .result
+                  else []
+                  end;
+                rows
+                | map(select(.name == $name))
+                | .[0]
+                | (.uuid // .id // empty)
+              '
+          }
+
+          database_id="$(resolve_database_id)"
+          if [[ -z "$database_id" ]]; then
+            echo "::error::D1 database '${D1_NAME}' was not found."
+            exit 1
+          fi
+
+          if [[ ! "$database_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$ ]] || \
+             [[ "$database_id" == "00000000-0000-0000-0000-000000000000" ]]; then
+            echo '::error::Resolved D1 database ID is invalid.'
+            exit 1
+          fi
+
+          echo "::add-mask::$database_id"
+          echo "database_id=$database_id" >> "$GITHUB_OUTPUT"
+
+      - name: 📬 Verify build-events Queue
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -Eeuo pipefail
+          queue_list="$(npx --yes "wrangler@${WRANGLER_VERSION}" queues list --page 1 2>&1 || true)"
+          if printf '%s\n' "$queue_list" | grep -Eq "(^|[^[:alnum:]_-])${QUEUE_NAME}([^[:alnum:]_-]|$)"; then
+            echo "Queue exists: ${QUEUE_NAME}"
+            exit 0
+          fi
+
+          set +e
+          create_output="$(npx --yes "wrangler@${WRANGLER_VERSION}" queues create "$QUEUE_NAME" 2>&1)"
+          create_status=$?
+          set -e
+          if ((create_status != 0)) && ! grep -qi 'already exists' <<<"$create_output"; then
+            printf '%s\n' "$create_output" >&2
+            exit "$create_status"
+          fi
+
+      - name: ⚙️ Render production Wrangler config
+        env:
+          DEADZONE_D1_DATABASE_ID: ${{ steps.d1.outputs.database_id }}
+        run: |
+          set -Eeuo pipefail
+          npm run config:production -- \
+            --source wrangler.jsonc \
+            --output wrangler.production.jsonc
+          test -s wrangler.production.jsonc
+
+      - name: 🗃️ Apply remote D1 migrations
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -Eeuo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" d1 migrations apply "$D1_NAME" \
+            --remote \
+            --config wrangler.production.jsonc
+
+      - name: 🚀 Deploy Worker with runtime secrets
+        id: deployment
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -Eeuo pipefail
+          secrets_file="$(mktemp)"
+          output_file="$(mktemp)"
+          trap 'rm -f "$secrets_file" "$output_file"' EXIT
+          chmod 600 "$secrets_file"
+
+          node --input-type=module - "$secrets_file" <<'NODE'
+          import { writeFileSync } from "node:fs";
+
+          const outputPath = process.argv[2];
+          const names = [
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_WEBHOOK_SECRET",
+            "BUILD_EVENT_SECRET",
+            "GITHUB_BUILD_TOKEN",
+            "CLOUD_CHANNEL_ID",
+          ];
+          const payload = Object.fromEntries(names.map((name) => {
+            const value = process.env[name];
+            if (!value) throw new Error(`Missing imported runtime value: ${name}`);
+            return [name, value];
+          }));
+          writeFileSync(outputPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+          NODE
+
+          npx --yes "wrangler@${WRANGLER_VERSION}" deploy \
+            --config wrangler.production.jsonc \
+            --secrets-file "$secrets_file" |
+            tee "$output_file"
+
+          worker_url="$(grep -Eo 'https://[A-Za-z0-9.-]+\.workers\.dev' "$output_file" | tail -n 1 || true)"
+          node - "$worker_url" <<'NODE'
+          const value = process.argv[2];
+          const url = new URL(value);
+          if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+            process.exit(1);
+          }
+          NODE
+          worker_url="${worker_url%/}"
+          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
+
+      - name: ❤️ Verify Worker health
+        env:
+          WORKER_URL: ${{ steps.deployment.outputs.worker_url }}
+        run: |
+          set -Eeuo pipefail
+          curl --silent --show-error --fail-with-body \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            "${WORKER_URL}/health" |
+            jq -e '
+              .ok == true and
+              .service == "deadzone-bot" and
+              .runtime == "cloudflare" and
+              (.features | index("group-guard") != null) and
+              (.features | index("membership-gate") != null) and
+              (.features | index("verified-user-access") != null)
+            ' >/dev/null
+
+      - name: 🤖 Register Telegram webhook
+        env:
+          WORKER_URL: ${{ steps.deployment.outputs.worker_url }}
+        run: |
+          set -Eeuo pipefail
+          response="$(curl --silent --show-error --fail-with-body \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=${WORKER_URL}/telegram/webhook" \
+            --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
+            --data-urlencode 'allowed_updates=["message","edited_message","callback_query","chat_member","my_chat_member"]' \
+            --data-urlencode 'drop_pending_updates=false')"
+          jq -e '.ok == true' <<<"$response" >/dev/null
+
+      - name: 🛡️ Verify Telegram membership prerequisites
+        run: |
+          set -Eeuo pipefail
+          api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+          discussion_username="$(jq -er '.vars.REQUIRED_DISCUSSION_USERNAME' wrangler.production.jsonc)"
+          channel_username="$(jq -er '.vars.REQUIRED_CHANNEL_USERNAME' wrangler.production.jsonc)"
+          expected_discussion_id="$(jq -er '.vars.START_CHAT_ID' wrangler.production.jsonc)"
+          expected_channel_id="$(jq -er '.vars.OWNER_BROADCAST_CHAT_ID' wrangler.production.jsonc)"
+          me="$(curl --silent --show-error --fail-with-body "${api}/getMe")"
+          bot_id="$(jq -er '.result.id' <<<"$me")"
+
+          discussion_chat="$(curl --silent --show-error --fail-with-body -G "${api}/getChat" \
+            --data-urlencode "chat_id=${discussion_username}")"
+          [[ "$(jq -er '.result.id' <<<"$discussion_chat")" == "$expected_discussion_id" ]]
+
+          discussion_member="$(curl --silent --show-error --fail-with-body -G "${api}/getChatMember" \
+            --data-urlencode "chat_id=${discussion_username}" \
+            --data-urlencode "user_id=${bot_id}")"
+          jq -e '
+            .result.status == "creator" or
+            (.result.status == "administrator" and
+             .result.can_delete_messages == true and
+             .result.can_restrict_members == true)
+          ' <<<"$discussion_member" >/dev/null
+
+          channel_chat="$(curl --silent --show-error --fail-with-body -G "${api}/getChat" \
+            --data-urlencode "chat_id=${channel_username}")"
+          [[ "$(jq -er '.result.id' <<<"$channel_chat")" == "$expected_channel_id" ]]
+
+          channel_member="$(curl --silent --show-error --fail-with-body -G "${api}/getChatMember" \
+            --data-urlencode "chat_id=${channel_username}" \
+            --data-urlencode "user_id=${bot_id}")"
+          jq -e '
+            .result.status == "creator" or
+            (.result.status == "administrator" and .result.can_post_messages == true)
+          ' <<<"$channel_member" >/dev/null
+
+      - name: ✅ Deployment summary
+        env:
+          WORKER_URL: ${{ steps.deployment.outputs.worker_url }}
+        run: |
+          {
+            echo '## ✅ DeadZone Bot deployed'
+            echo
+            echo "- Worker: ${WORKER_NAME}"
+            echo "- Source: private ${BOT_REPOSITORY}@main"
+            echo "- Runtime: private ${RUNTIME_REPOSITORY}/bot.env"
+            echo "- URL: ${WORKER_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"
