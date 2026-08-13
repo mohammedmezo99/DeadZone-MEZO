@@ -157,14 +157,6 @@ jobs:
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
 
-      - name: 📡 Correlate accepted Lite request
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 runtime/report_build_event.py running \
-            --project lite \
-            --message "DeadZone Lite request accepted by GitHub Actions." || true
-
       - name: 💾 Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
         with:
@@ -199,7 +191,9 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          if ! python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+            echo "::warning::Lite live tracking start event failed; continuing ROM build"
+          fi
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -259,7 +253,9 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          if ! python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+            echo "::warning::Lite live tracking pack event failed; continuing ROM packaging"
+          fi
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
       - name: ⬆️ Upload ROM mirrors
@@ -269,7 +265,9 @@ jobs:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
           set -Eeuo pipefail
-          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          if ! python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+            echo "::warning::Lite live tracking upload event failed; continuing ROM upload"
+          fi
 
           set -a
           # shellcheck disable=SC1091
@@ -376,7 +374,10 @@ jobs:
         if: success()
         working-directory: toolbuild
         run: |
-          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          set -euo pipefail
+          if ! python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+            echo "::warning::Lite success live event failed; keeping successful ROM build"
+          fi
 
       - name: ❌ Send failure notification
         if: failure()
