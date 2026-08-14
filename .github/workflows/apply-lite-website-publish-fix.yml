@@ -1,0 +1,46 @@
+name: Apply Lite website publishing fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-lite-website-publish-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Validate and apply website publishing fix
+        run: |
+          set -Eeuo pipefail
+          git apply --check scripts/fix-lite-website-publish.patch
+          git apply scripts/fix-lite-website-publish.patch
+          git diff --check
+          grep -Fq 'DEADZONE_RESULT_NAME=%s' .github/workflows/lite-core.yml
+          grep -Fq 'DEADZONE_WEBSITE_DOWNLOAD_URL' .github/workflows/lite-core.yml
+          grep -Fq 'DEADZONE_SOURCEFORGE_URL' .github/workflows/lite-core.yml
+          grep -Fq 'DEADZONE_PIXELDRAIN_URL' .github/workflows/lite-core.yml
+
+      - name: Commit final fix
+        run: |
+          set -Eeuo pipefail
+          rm -f scripts/fix-lite-website-publish.patch
+          rm -f .github/workflows/apply-lite-website-publish-fix.yml
+          git config user.name 'DeadZone Build Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Fix Lite website release publishing'
+          git push origin HEAD:main
