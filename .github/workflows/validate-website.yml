@@ -1,0 +1,71 @@
+name: Validate DeadZone Website
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: 🧪 Validate Website + Release Publisher
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 🔐 Validate private repository token
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || {
+            echo '::error::Missing GH_TOKEN secret.'
+            exit 1
+          }
+
+      - name: 📥 Checkout private website
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/Deadzone
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: website
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 📥 Checkout private release publisher
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            publish-website-release.py
+          sparse-checkout-cone-mode: false
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: 🐍 Validate release publisher
+        run: |
+          set -Eeuo pipefail
+          test -s runtime/publish-website-release.py
+          python3 -m py_compile runtime/publish-website-release.py
+
+      - name: 📦 Install website dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: 🧪 Typecheck website
+        working-directory: website
+        run: npm run typecheck
+
+      - name: ✅ Run website unit tests
+        working-directory: website
+        run: npm run test:unit
