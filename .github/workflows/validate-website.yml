@@ -2,6 +2,9 @@ name: Validate DeadZone Website
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/validate-website.yml
 
 permissions:
   contents: read
