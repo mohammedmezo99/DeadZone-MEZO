@@ -370,8 +370,6 @@ jobs:
           mirror_status=${PIPESTATUS[0]}
           set -e
 
-          sudo rm -rf "$PWD/out" "$PWD/build"
-
           if (( google_status != 0 && mirror_status != 0 )); then
             echo "::error::Google Drive and all secondary ROM mirrors failed"
             exit 1
@@ -564,5 +562,6 @@ jobs:
       - name: 🧽 Remove private runtime files
         if: always()
         run: |
+          sudo rm -rf toolbuild/out toolbuild/build
           rm -rf runtime
           rm -f toolbuild/rclone.conf
