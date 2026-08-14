@@ -22,69 +22,62 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: Apply exact website publishing fix
+      - name: Apply line-safe website publishing fix
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path('.github/workflows/lite-core.yml')
-          text = path.read_text(encoding='utf-8')
+          lines = path.read_text(encoding='utf-8').splitlines()
 
-          replacements = [
-              (
-                  "          printf 'DEADZONE_FILE_SIZE=%s\\nDEADZONE_INTEGRITY_VERIFIED=1\\n' \"$final_size_human\" >> \"$GITHUB_ENV\"",
-                  "          printf 'DEADZONE_FILE_SIZE=%s\\nDEADZONE_INTEGRITY_VERIFIED=1\\nDEADZONE_RESULT_NAME=%s\\n' \"$final_size_human\" \"$final_name\" >> \"$GITHUB_ENV\"",
-              ),
-              (
-                  '''          if [[ -z "${DEADZONE_GOOGLE_DRIVE_URL:-}" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" ]]; then
-            echo "::warning::Website release skipped because Google Drive or ZIP verification metadata is unavailable"
-            exit 0
-          fi''',
-                  '''          website_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
-          [[ -n "$website_url" ]] || website_url="${DEADZONE_SOURCEFORGE_URL:-}"
-          [[ -n "$website_url" ]] || website_url="${DEADZONE_PIXELDRAIN_URL:-}"
+          def unique(needle):
+              matches = [i for i, line in enumerate(lines) if needle in line]
+              if len(matches) != 1:
+                  raise SystemExit(f'Expected one line containing {needle!r}; found {len(matches)}')
+              return matches[0]
 
-          if [[ -z "$website_url" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" || -z "${DEADZONE_RESULT_NAME:-}" ]]; then
-            echo "::warning::Website release skipped: no successful download mirror or verified ZIP metadata is available"
-            exit 0
-          fi
-          export DEADZONE_WEBSITE_DOWNLOAD_URL="$website_url"''',
-              ),
-              (
-                  '''          filename = env("DEADZONE_RESULT_NAME")
-          drive_url = env("DEADZONE_GOOGLE_DRIVE_URL")
-          parsed = urlparse(drive_url)
-          if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,39}", codename):
-              raise SystemExit("Invalid website release codename")
-          if not filename.lower().endswith(".zip") or "/" in filename or "\\\\" in filename:
-              raise SystemExit("Invalid website release filename")
-          if parsed.scheme != "https" or parsed.hostname != "drive.google.com" or parsed.username or parsed.password:
-              raise SystemExit("Website release requires a safe Google Drive URL")''',
-                  '''          filename = env("DEADZONE_RESULT_NAME")
-          download_url = env("DEADZONE_WEBSITE_DOWNLOAD_URL")
-          parsed = urlparse(download_url)
-          allowed_hosts = {"drive.google.com", "sourceforge.net", "pixeldrain.com"}
-          if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,39}", codename):
-              raise SystemExit("Invalid website release codename")
-          if not filename.lower().endswith(".zip") or "/" in filename or "\\\\" in filename:
-              raise SystemExit("Invalid website release filename")
-          if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password:
-              raise SystemExit("Website release requires a safe supported download URL")''',
-              ),
-              (
-                  '              "downloadUrl": drive_url,',
-                  '              "downloadUrl": download_url,',
-              ),
+          i = unique("printf 'DEADZONE_FILE_SIZE=%s\\nDEADZONE_INTEGRITY_VERIFIED=1\\n'")
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          lines[i] = indent + "printf 'DEADZONE_FILE_SIZE=%s\\nDEADZONE_INTEGRITY_VERIFIED=1\\nDEADZONE_RESULT_NAME=%s\\n' \"$final_size_human\" \"$final_name\" >> \"$GITHUB_ENV\""
+
+          i = unique('if [[ -z "${DEADZONE_GOOGLE_DRIVE_URL:-}"')
+          if i + 3 >= len(lines) or lines[i + 3].strip() != 'fi':
+              raise SystemExit('Website publishing guard shape changed')
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          lines[i:i + 4] = [
+              indent + 'website_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"',
+              indent + '[[ -n "$website_url" ]] || website_url="${DEADZONE_SOURCEFORGE_URL:-}"',
+              indent + '[[ -n "$website_url" ]] || website_url="${DEADZONE_PIXELDRAIN_URL:-}"',
+              '',
+              indent + 'if [[ -z "$website_url" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" || -z "${DEADZONE_RESULT_NAME:-}" ]]; then',
+              indent + '  echo "::warning::Website release skipped: no successful download mirror or verified ZIP metadata is available"',
+              indent + '  exit 0',
+              indent + 'fi',
+              indent + 'export DEADZONE_WEBSITE_DOWNLOAD_URL="$website_url"',
           ]
 
-          for old, new in replacements:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'Expected exactly one website publishing replacement target; found {count}')
-              text = text.replace(old, new, 1)
+          i = unique('drive_url = env("DEADZONE_GOOGLE_DRIVE_URL")')
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          if 'parsed = urlparse(drive_url)' not in lines[i + 1]:
+              raise SystemExit('Website URL parser shape changed')
+          lines[i:i + 2] = [
+              indent + 'download_url = env("DEADZONE_WEBSITE_DOWNLOAD_URL")',
+              indent + 'parsed = urlparse(download_url)',
+              indent + 'allowed_hosts = {"drive.google.com", "sourceforge.net", "pixeldrain.com"}',
+          ]
 
-          path.write_text(text, encoding='utf-8')
+          i = unique('parsed.hostname != "drive.google.com"')
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          if i + 1 >= len(lines) or 'safe Google Drive URL' not in lines[i + 1]:
+              raise SystemExit('Website URL validation shape changed')
+          lines[i] = indent + 'if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password:'
+          lines[i + 1] = indent + '    raise SystemExit("Website release requires a safe supported download URL")'
+
+          i = unique('"downloadUrl": drive_url,')
+          lines[i] = lines[i].replace('"downloadUrl": drive_url,', '"downloadUrl": download_url,')
+
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
           PY
 
           git diff --check
