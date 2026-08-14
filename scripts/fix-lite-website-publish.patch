@@ -1,0 +1,59 @@
+--- a/.github/workflows/lite-core.yml
++++ b/.github/workflows/lite-core.yml
+@@ -347,7 +347,7 @@ jobs:
+               value /= 1024
+           PY
+           )"
+-          printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\n' "$final_size_human" >> "$GITHUB_ENV"
++          printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' "$final_size_human" "$final_name" >> "$GITHUB_ENV"
+           codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+           rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
+           if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
+@@ -407,8 +407,15 @@ jobs:
+           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+         run: |
+           set -Eeuo pipefail
+-          if [[ -z "${DEADZONE_GOOGLE_DRIVE_URL:-}" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" ]]; then
+-            echo "::warning::Website release skipped because Google Drive or ZIP verification metadata is unavailable"
++          website_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
++          [[ -n "$website_url" ]] || website_url="${DEADZONE_SOURCEFORGE_URL:-}"
++          [[ -n "$website_url" ]] || website_url="${DEADZONE_PIXELDRAIN_URL:-}"
++
++          if [[ -z "$website_url" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" || -z "${DEADZONE_RESULT_NAME:-}" ]]; then
++            echo "::warning::Website release skipped: no successful download mirror or verified ZIP metadata is available"
+             exit 0
+           fi
++          export DEADZONE_WEBSITE_DOWNLOAD_URL="$website_url"
++
+           command -v gh >/dev/null 2>&1 || {
+             echo "::warning::gh CLI is unavailable; website release skipped"
+             exit 0
+@@ -451,15 +458,17 @@ jobs:
+ 
+           codename = text("bin/ddevice/device_f.txt").lower()
+           filename = env("DEADZONE_RESULT_NAME")
+-          drive_url = env("DEADZONE_GOOGLE_DRIVE_URL")
+-          parsed = urlparse(drive_url)
++          download_url = env("DEADZONE_WEBSITE_DOWNLOAD_URL")
++          parsed = urlparse(download_url)
++          allowed_hosts = {"drive.google.com", "sourceforge.net", "pixeldrain.com"}
+           if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,39}", codename):
+               raise SystemExit("Invalid website release codename")
+           if not filename.lower().endswith(".zip") or "/" in filename or "\\" in filename:
+               raise SystemExit("Invalid website release filename")
+-          if parsed.scheme != "https" or parsed.hostname != "drive.google.com" or parsed.username or parsed.password:
+-              raise SystemExit("Website release requires a safe Google Drive URL")
++          if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password:
++              raise SystemExit("Website release requires a safe supported download URL")
+ 
+           release = {
+               "id": env("DEADZONE_REQUEST_ID"),
+@@ -472,7 +481,7 @@ jobs:
+               "region": text("bin/ddevice/device_type.txt"),
+               "fileSize": env("DEADZONE_FILE_SIZE"),
+               "filename": filename,
+-              "downloadUrl": drive_url,
++              "downloadUrl": download_url,
+               "integrityVerified": True,
+               "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+               "style": "Lite",
