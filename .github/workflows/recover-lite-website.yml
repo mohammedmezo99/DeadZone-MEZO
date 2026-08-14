@@ -1,0 +1,112 @@
+name: DeadZone Lite Website Recovery
+
+run-name: 🌐 Recover Lite Website · ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 🆔 DeadZone Lite request ID
+        required: true
+        type: string
+      edition_version:
+        description: ✨ DeadZone Lite version
+        required: true
+        type: string
+      codename:
+        description: 📱 Device codename
+        required: true
+        type: string
+      rom_version:
+        description: 🧩 ROM version
+        required: true
+        type: string
+      android_version:
+        description: 🤖 Android version
+        required: true
+        type: string
+      region:
+        description: 🌍 ROM region
+        required: true
+        type: string
+      filename:
+        description: 📦 Final ZIP filename
+        required: true
+        type: string
+      google_drive_url:
+        description: 🔗 Google Drive mirror
+        required: false
+        type: string
+      sourceforge_url:
+        description: 🔗 SourceForge mirror
+        required: false
+        type: string
+      pixeldrain_url:
+        description: 🔐 PixelDrain integrity mirror
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: 🌐 Re-sync Website Catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 🔐 Validate recovery credentials
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || {
+            echo '::error::Missing GH_TOKEN secret.'
+            exit 1
+          }
+
+      - name: 📥 Checkout private recovery runtime
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            publish-website-release.py
+          sparse-checkout-cone-mode: false
+
+      - name: 🧪 Validate publisher
+        run: |
+          set -Eeuo pipefail
+          test -s runtime/publish-website-release.py
+          python3 -m py_compile runtime/publish-website-release.py
+
+      - name: 🌐 Re-sync verified Lite release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          EDITION_VERSION: ${{ inputs.edition_version }}
+          CODENAME: ${{ inputs.codename }}
+          ROM_VERSION: ${{ inputs.rom_version }}
+          ANDROID_VERSION: ${{ inputs.android_version }}
+          REGION: ${{ inputs.region }}
+          FILENAME: ${{ inputs.filename }}
+          GOOGLE_DRIVE_URL: ${{ inputs.google_drive_url }}
+          SOURCEFORGE_URL: ${{ inputs.sourceforge_url }}
+          PIXELDRAIN_URL: ${{ inputs.pixeldrain_url }}
+        run: |
+          set -Eeuo pipefail
+          python3 runtime/publish-website-release.py recovery \
+            --request-id "$REQUEST_ID" \
+            --edition-version "$EDITION_VERSION" \
+            --codename "$CODENAME" \
+            --rom-version "$ROM_VERSION" \
+            --android-version "$ANDROID_VERSION" \
+            --region "$REGION" \
+            --filename "$FILENAME" \
+            --google-drive-url "$GOOGLE_DRIVE_URL" \
+            --sourceforge-url "$SOURCEFORGE_URL" \
+            --pixeldrain-url "$PIXELDRAIN_URL"
