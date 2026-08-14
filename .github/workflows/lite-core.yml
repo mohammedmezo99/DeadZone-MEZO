@@ -249,16 +249,16 @@ jobs:
           set -euo pipefail
           sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log
 
-      - name: 📦 Pack ROM
+      - name: 📦 Pack Super
         working-directory: toolbuild
         run: |
           set -euo pipefail
           if ! python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
             echo "::warning::Lite live tracking pack event failed; continuing ROM packaging"
           fi
-          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash packSuper.sh 2>&1 | tee -a build_action.log
 
-      - name: ⬆️ Upload ROM mirrors
+      - name: 🗜️ Package Final ZIP
         working-directory: toolbuild
         env:
           SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
@@ -291,32 +291,23 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rsync openssh-client curl
           fi
 
-          python3 - <<'PY'
-          from pathlib import Path
+          sudo -E bash packZIP.sh 2>&1 | tee -a build_action.log
 
-          path = Path("uploadROM.sh")
-          text = path.read_text(encoding="utf-8")
-          old = '''upload "Clean Workflow.."
-          rm -rf "$work_dir/out"
-          rm -rf "$work_dir/build"
+      - name: ⬆️ Upload ROM mirrors
+        working-directory: toolbuild
+        env:
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          set -Eeuo pipefail
 
-          upload "Build $final_name successful!"'''
-          new = '''upload "Clean Workflow.."
-          if [[ "${DEADZONE_DEFER_CLEANUP:-0}" != "1" ]]; then
-              rm -rf "$work_dir/out"
-              rm -rf "$work_dir/build"
-          else
-              upload "Cleanup deferred for secondary mirrors"
-          fi
-
-          upload "Build $final_name successful!"'''
-          if text.count(old) != 1:
-              raise SystemExit("uploadROM.sh cleanup contract changed; refusing unsafe runtime patch")
-          path.write_text(text.replace(old, new), encoding="utf-8")
-          PY
+          set -a
+          # shellcheck disable=SC1091
+          source "$GITHUB_WORKSPACE/runtime/upload.env"
+          set +a
 
           set +e
-          DEADZONE_DEFER_CLEANUP=1 sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
           google_status=${PIPESTATUS[0]}
           set -e
 
