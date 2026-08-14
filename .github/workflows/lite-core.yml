@@ -109,6 +109,7 @@ jobs:
             report_build_event.py
             upload.env
             upload-mirrors.sh
+            publish-website-release.py
           sparse-checkout-cone-mode: false
 
       - name: ⚙️ Load central runtime
@@ -118,13 +119,14 @@ jobs:
           DEADZONE_CONTROLLED_BUILD: "1"
         run: |
           set -euo pipefail
-          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py upload.env upload-mirrors.sh; do
+          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py upload.env upload-mirrors.sh publish-website-release.py; do
             if [[ ! -s "runtime/${runtime_file}" ]]; then
               echo "::error::Central runtime file is missing or empty: ${runtime_file}"
               exit 1
             fi
           done
           chmod 700 runtime/load-build.sh runtime/upload-mirrors.sh
+          python3 -m py_compile runtime/publish-website-release.py
           runtime/load-build.sh lite
 
       - name: ✅ Validate loaded runtime
@@ -395,129 +397,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -Eeuo pipefail
-          website_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
-          [[ -n "$website_url" ]] || website_url="${DEADZONE_SOURCEFORGE_URL:-}"
-          [[ -n "$website_url" ]] || website_url="${DEADZONE_PIXELDRAIN_URL:-}"
-
-          if [[ -z "$website_url" || "${DEADZONE_INTEGRITY_VERIFIED:-0}" != "1" || -z "${DEADZONE_FILE_SIZE:-}" || -z "${DEADZONE_RESULT_NAME:-}" ]]; then
-            echo "::warning::Website release skipped: no successful download mirror or verified ZIP metadata is available"
-            exit 0
-          fi
-          export DEADZONE_WEBSITE_DOWNLOAD_URL="$website_url"
-          command -v gh >/dev/null 2>&1 || {
-            echo "::warning::gh CLI is unavailable; website release skipped"
+          [[ -n "${DEADZONE_RESULT_NAME:-}" ]] || {
+            echo "::warning::Website release skipped: final ZIP name is unavailable"
             exit 0
           }
-
-          endpoint="/repos/mohammedmezo99/Deadzone/contents/src/data/published-builds.json"
-          catalog="$RUNNER_TEMP/deadzone-published-builds.json"
-          updater="$RUNNER_TEMP/deadzone-update-catalog.py"
-
-          cat > "$updater" <<'PY'
-          import json
-          import os
-          import re
-          import sys
-          from datetime import datetime, timezone
-          from pathlib import Path
-          from urllib.parse import urlparse
-
-          def env(name):
-              value = os.environ.get(name, "").strip()
-              if not value:
-                  raise SystemExit(f"Missing website release value: {name}")
-              return value
-
-          def text(path):
-              value = Path(path).read_text(encoding="utf-8", errors="replace").strip()
-              if not value:
-                  raise SystemExit(f"Missing website release metadata: {path}")
-              return value
-
-          path = Path(sys.argv[1])
-          catalog = json.loads(path.read_text(encoding="utf-8"))
-          if not isinstance(catalog, list) or any(not isinstance(entry, dict) for entry in catalog):
-              raise SystemExit("Website release catalog must be a JSON array of objects")
-
-          codename = text("bin/ddevice/device_f.txt").lower()
-          filename = env("DEADZONE_RESULT_NAME")
-          download_url = env("DEADZONE_WEBSITE_DOWNLOAD_URL")
-          parsed = urlparse(download_url)
-          allowed_hosts = {"drive.google.com", "sourceforge.net", "pixeldrain.com"}
-          if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,39}", codename):
-              raise SystemExit("Invalid website release codename")
-          if not filename.lower().endswith(".zip") or "/" in filename or "\\" in filename:
-              raise SystemExit("Invalid website release filename")
-          if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password:
-              raise SystemExit("Website release requires a safe supported download URL")
-
-          release = {
-              "id": env("DEADZONE_REQUEST_ID"),
-              "project": "lite",
-              "edition": "Lite",
-              "editionVersion": text("Version"),
-              "codename": codename,
-              "romVersion": text("bin/ddevice/base_rom_code.txt"),
-              "androidVersion": text("bin/ddevice/androidver.txt"),
-              "region": text("bin/ddevice/device_type.txt"),
-              "fileSize": env("DEADZONE_FILE_SIZE"),
-              "filename": filename,
-              "downloadUrl": download_url,
-              "integrityVerified": True,
-              "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-              "style": "Lite",
-              "status": "Available",
-          }
-
-          def same(entry):
-              return entry.get("id") == release["id"] or (
-                  str(entry.get("codename", "")).lower(),
-                  entry.get("edition") or entry.get("style"),
-                  str(entry.get("filename", "")).lower(),
-              ) == (
-                  release["codename"],
-                  release["edition"],
-                  release["filename"].lower(),
-              )
-
-          path.write_text(
-              json.dumps([release, *(entry for entry in catalog if not same(entry))], indent=2) + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-          for attempt in 1 2 3 4; do
-            response="$(gh api "${endpoint}?ref=main")"
-            sha="$(jq -r '.sha' <<< "$response")"
-            jq -r '.content' <<< "$response" | tr -d '\n' | base64 -d > "$catalog"
-            python3 "$updater" "$catalog"
-            encoded="$(base64 -w0 "$catalog")"
-            codename="$(tr '[:upper:]' '[:lower:]' < bin/ddevice/device_f.txt | tr -d '\r\n')"
-
-            set +e
-            gh_output="$(gh api --method PUT "$endpoint" \
-              -f message="release: publish Lite ${codename} ${DEADZONE_RESULT_NAME}" \
-              -f content="$encoded" \
-              -f sha="$sha" \
-              -f branch=main 2>&1)"
-            gh_status=$?
-            set -e
-
-            if (( gh_status == 0 )); then
-              echo "Website release catalog published successfully"
-              exit 0
-            fi
-            if [[ "$gh_output" != *"HTTP 409"* && "$gh_output" != *"HTTP 422"* ]]; then
-              echo "::error::Website release catalog update failed"
-              printf '%s\n' "$gh_output"
-              exit 1
-            fi
-            echo "::warning::Website catalog changed concurrently; retrying (${attempt}/4)"
-            sleep "$attempt"
-          done
-
-          echo "::error::Website release catalog could not be published after retries"
-          exit 1
+          python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
+            --request-id "$DEADZONE_REQUEST_ID" \
+            --edition-version "$(tr -d '\r\n' < Version)" \
+            --codename "$(tr -d '\r\n' < bin/ddevice/device_f.txt)" \
+            --rom-version "$(tr -d '\r\n' < bin/ddevice/base_rom_code.txt)" \
+            --android-version "$(tr -d '\r\n' < bin/ddevice/androidver.txt)" \
+            --region "$(tr -d '\r\n' < bin/ddevice/device_type.txt)" \
+            --filename "$DEADZONE_RESULT_NAME" \
+            --artifact-path "$PWD/out/$DEADZONE_RESULT_NAME" \
+            --google-drive-url "${DEADZONE_GOOGLE_DRIVE_URL:-}" \
+            --sourceforge-url "${DEADZONE_SOURCEFORGE_URL:-}" \
+            --pixeldrain-url "${DEADZONE_PIXELDRAIN_URL:-}"
 
       - name: ❌ Send failure notification
         if: failure()
