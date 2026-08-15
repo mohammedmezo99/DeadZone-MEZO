@@ -1,0 +1,102 @@
+name: Temporary Lite ROM Cleanup Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tmp-lite-rom-cleanup-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-lite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Lite engine commit
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: d37abfa542686b40f0b7deaca23ed2e47df2433f
+          token: ${{ secrets.GH_TOKEN }}
+          path: lite
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate changed shell scripts
+        working-directory: lite
+        shell: bash
+        run: bash -n build.sh scripts/device/collect_rom_information.sh
+
+      - name: Test downloaded ROM cleanup behavior
+        working-directory: lite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          collect_script="$PWD/scripts/device/collect_rom_information.sh"
+          test_root="$RUNNER_TEMP/lite-rom-cleanup"
+          rm -rf "$test_root"
+          mkdir -p "$test_root"
+
+          prepare_case() {
+            local case_dir="$1"
+            rm -rf "$case_dir"
+            mkdir -p "$case_dir/build/.deadzone/state" "$case_dir/scripts/device"
+            printf 'rom-archive\n' > "$case_dir/source.zip"
+            cat > "$case_dir/scripts/device/resolve_device_name.sh" <<'SH'
+          #!/bin/bash
+          exit 0
+          SH
+            cat > "$case_dir/scripts/device/collect_rom_metadata.sh" <<'SH'
+          #!/bin/bash
+          [[ -f "$1" ]] || exit 81
+          exit "${METADATA_STATUS:-0}"
+          SH
+          }
+
+          run_collect='set -Eeuo pipefail
+          cd "$CASE_DIR"
+          work_dir="$CASE_DIR"
+          device_f="testdevice"
+          baserom="$CASE_DIR/source.zip"
+          baserom_type="payload"
+          partition_fs_map="system=EROFS;"
+          downloaded_rom_path="$DOWNLOADED_ROM_PATH"
+          mods(){ :; }
+          error(){ printf "[ERROR] %s\\n" "$*" >&2; }
+          warn(){ printf "[WARN] %s\\n" "$*" >&2; }
+          info(){ printf "[INFO] %s\\n" "$*"; }
+          report_build_status(){ :; }
+          source "$COLLECT_SCRIPT"'
+
+          success_case="$test_root/success"
+          prepare_case "$success_case"
+          METADATA_STATUS=0 CASE_DIR="$success_case" COLLECT_SCRIPT="$collect_script" \
+            DOWNLOADED_ROM_PATH="$success_case/source.zip" bash -c "$run_collect"
+          [[ ! -e "$success_case/source.zip" ]] || {
+            echo "[ERROR] Downloaded archive survived successful metadata collection" >&2
+            exit 1
+          }
+
+          failure_case="$test_root/metadata-failure"
+          prepare_case "$failure_case"
+          if METADATA_STATUS=9 CASE_DIR="$failure_case" COLLECT_SCRIPT="$collect_script" \
+            DOWNLOADED_ROM_PATH="$failure_case/source.zip" bash -c "$run_collect"; then
+            echo "[ERROR] Metadata failure unexpectedly succeeded" >&2
+            exit 1
+          fi
+          [[ -f "$failure_case/source.zip" ]] || {
+            echo "[ERROR] Archive was deleted even though metadata collection failed" >&2
+            exit 1
+          }
+
+          local_case="$test_root/local-input"
+          prepare_case "$local_case"
+          METADATA_STATUS=0 CASE_DIR="$local_case" COLLECT_SCRIPT="$collect_script" \
+            DOWNLOADED_ROM_PATH="" bash -c "$run_collect"
+          [[ -f "$local_case/source.zip" ]] || {
+            echo "[ERROR] Local ROM input was deleted" >&2
+            exit 1
+          }
