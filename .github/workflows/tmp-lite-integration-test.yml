@@ -1,0 +1,103 @@
+name: Temporary Lite Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tmp-lite-integration-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-lite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Lite engine
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: lite
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile reporters and metadata tools
+        working-directory: lite
+        run: python -m py_compile scripts/notification/notify.py scripts/notification/live_event.py scripts/verify/verify_live_event_behavior.py scripts/verify/verify_payload_metadata_behavior.py scripts/verify/verify_partition_reuse_behavior.py scripts/payload/payload_metadata.py scripts/partition/partition_reuse.py scripts/super/super_lpmake_args.py scripts/package/generate_flash_commands.py
+
+      - name: Test signed event contract
+        working-directory: lite
+        run: python scripts/notification/notify.py --self-test
+
+      - name: Test live telemetry behavior
+        working-directory: lite
+        run: python -m unittest -v scripts/verify/verify_live_event_behavior.py
+
+      - name: Test payload metadata behavior
+        working-directory: lite
+        run: python -m unittest -v scripts/verify/verify_payload_metadata_behavior.py
+
+      - name: Test original partition image reuse
+        working-directory: lite
+        run: python -m unittest -v scripts/verify/verify_partition_reuse_behavior.py
+
+      - name: Validate canonical repository paths
+        working-directory: lite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          required_paths=(
+            scripts/core/functions.sh
+            scripts/notification/live_event.py
+            scripts/modifications/replace_configured_text_range.py
+            scripts/package/prepare_rom_package.sh
+            scripts/package/collect_flash_images.sh
+            scripts/package/prepare_flash_template.sh
+            tools/Linux/x86_64/lpmake
+            tools/Linux/x86_64/make_ext4fs
+            tools/Linux/x86_64/mkfs.erofs
+            tools/apktool/apke.jar
+            tools/apktool/baksmaliv2.jar
+            tools/apktool/smaliv2.jar
+            templates/flash/META-INF/Data/Structure
+            mods/Package/KaoriosToolbox/apply.sh
+            mods/Package/Disable\ Signature\ Verification/common/jar_engine.sh
+          )
+
+          for required_path in "${required_paths[@]}"; do
+            git cat-file -e "HEAD:$required_path" || {
+              echo "[ERROR] Missing canonical repository path: $required_path" >&2
+              exit 1
+            }
+          done
+
+          legacy_refs=(
+            '$work_dir/functions.sh'
+            '$WORK_DIR/functions.sh'
+            '$work_dir/live_event.py'
+            '$WORK_DIR/live_event.py'
+          )
+
+          for legacy_ref in "${legacy_refs[@]}"; do
+            if git grep -n -F "$legacy_ref" HEAD -- '*.sh'; then
+              echo "[ERROR] Legacy repository path reference detected: $legacy_ref" >&2
+              exit 1
+            fi
+          done
+
+      - name: Validate shell scripts
+        working-directory: lite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n build.sh scripts/upload/upload_rom.sh scripts/super/pack_super.sh scripts/package/pack_zip.sh scripts/environment/setup.sh scripts/core/functions.sh scripts/core/functions-core.sh scripts/notification/live-shell.sh scripts/super/super_metadata.sh
+          find scripts mods templates -type f -name '*.sh' -print0 | xargs -0 -r bash -n
