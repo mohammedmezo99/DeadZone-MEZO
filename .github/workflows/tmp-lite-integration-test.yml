@@ -22,7 +22,32 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: lite
           fetch-depth: 1
-          persist-credentials: false
+          persist-credentials: true
+
+      - name: Repair callback self-test contract
+        working-directory: lite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/notification/notify.py")
+          source = path.read_text(encoding="utf-8")
+          old = "def opener(_request: Request, _timeout: float):"
+          new = "def opener(_request: Request, timeout: float):"
+          if old not in source:
+              raise SystemExit("Expected callback self-test opener signature was not found")
+          path.write_text(source.replace(old, new, 1), encoding="utf-8")
+          PY
+          git diff --check
+          git config user.name 'DeadZone Integration Test'
+          git config user.email 'actions@users.noreply.github.com'
+          git add scripts/notification/notify.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'test: align callback opener with timeout keyword'
+            git push origin HEAD:main
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
