@@ -99,7 +99,6 @@ jobs:
 
     steps:
       - name: 📥 Checkout DeadZone_EXE main
-        id: engine
         uses: actions/checkout@v5
         with:
           repository: ${{ needs.resolve.outputs.engine_repository }}
@@ -173,7 +172,7 @@ jobs:
         working-directory: engine
         run: python build.py --clean --onefile
 
-      - name: ⚡ Bundle trusted Android platform-tools
+      - name: ⚡ Bundle minimal Android Fastboot runtime
         working-directory: engine
         shell: python
         env:
@@ -212,20 +211,36 @@ jobs:
           if not any(download(url) for url in urls):
               raise SystemExit("Unable to download Android platform-tools")
 
+          fastboot_name = "fastboot.exe" if os.name == "nt" else "fastboot"
+          required = [
+              f"platform-tools/{fastboot_name}",
+              "platform-tools/NOTICE.txt",
+              "platform-tools/source.properties",
+          ]
+          if os.name == "nt":
+              required += [
+                  "platform-tools/AdbWinApi.dll",
+                  "platform-tools/AdbWinUsbApi.dll",
+              ]
+
           destination = Path("dist/platform-tools")
           shutil.rmtree(destination, ignore_errors=True)
           with zipfile.ZipFile(archive_path) as archive:
-              members = [name for name in archive.namelist() if name.startswith("platform-tools/")]
-              if not members:
-                  raise SystemExit("Android platform-tools archive has no platform-tools directory")
-              archive.extractall("dist")
+              available = set(archive.namelist())
+              missing = [member for member in required if member not in available]
+              if missing:
+                  raise SystemExit(
+                      "Android platform-tools archive is missing: " + ", ".join(missing)
+                  )
+              for member in required:
+                  archive.extract(member, "dist")
 
-          fastboot = destination / ("fastboot.exe" if os.name == "nt" else "fastboot")
+          fastboot = destination / fastboot_name
           if not fastboot.is_file():
               raise SystemExit(f"Fastboot is missing after extraction: {fastboot}")
           archive_path.unlink(missing_ok=True)
 
-      - name: 🔧 Set platform-tools permissions
+      - name: 🔧 Set Fastboot permissions
         if: runner.os != 'Windows'
         working-directory: engine
         shell: bash
@@ -241,6 +256,18 @@ jobs:
           config = Path("config.json")
           if config.is_file():
               shutil.copy2(config, Path("dist/config.json"))
+
+      - name: 📏 Report package size
+        working-directory: engine
+        shell: python
+        run: |
+          from pathlib import Path
+
+          files = [path for path in Path("dist").rglob("*") if path.is_file()]
+          total = sum(path.stat().st_size for path in files)
+          print(f"DeadZone package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
+          for path in sorted(files):
+              print(f"  {path.relative_to('dist')}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
 
       - name: 📤 Upload ${{ matrix.artifact_name }}
         uses: actions/upload-artifact@v4
