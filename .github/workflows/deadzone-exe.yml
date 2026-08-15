@@ -180,6 +180,7 @@ jobs:
         run: |
           import os
           import shutil
+          import sys
           import time
           import urllib.error
           import urllib.request
@@ -218,13 +219,20 @@ jobs:
               "platform-tools/source.properties",
           ]
           if os.name == "nt":
-              required += [
-                  "platform-tools/AdbWinApi.dll",
-                  "platform-tools/AdbWinUsbApi.dll",
-              ]
+              required.append("platform-tools/AdbWinApi.dll")
 
-          destination = Path("dist/platform-tools")
+          if sys.platform == "darwin":
+              app_bundle = Path("dist/DeadZone.app")
+              if not app_bundle.is_dir():
+                  raise SystemExit("DeadZone.app was not produced")
+              Path("dist/DeadZone").unlink(missing_ok=True)
+              destination = app_bundle / "Contents/MacOS/platform-tools"
+          else:
+              destination = Path("dist/platform-tools")
+
           shutil.rmtree(destination, ignore_errors=True)
+          destination.mkdir(parents=True, exist_ok=True)
+
           with zipfile.ZipFile(archive_path) as archive:
               available = set(archive.namelist())
               missing = [member for member in required if member not in available]
@@ -233,7 +241,9 @@ jobs:
                       "Android platform-tools archive is missing: " + ", ".join(missing)
                   )
               for member in required:
-                  archive.extract(member, "dist")
+                  target = destination / Path(member).name
+                  with archive.open(member) as source, target.open("wb") as output:
+                      shutil.copyfileobj(source, output)
 
           fastboot = destination / fastboot_name
           if not fastboot.is_file():
@@ -244,18 +254,27 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: engine
         shell: bash
-        run: chmod +x dist/platform-tools/fastboot
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            chmod +x dist/DeadZone.app/Contents/MacOS/platform-tools/fastboot
+          else
+            chmod +x dist/platform-tools/fastboot
+          fi
 
       - name: ⚙️ Copy runtime config
         working-directory: engine
         shell: python
         run: |
           import shutil
+          import sys
           from pathlib import Path
 
           config = Path("config.json")
           if config.is_file():
-              shutil.copy2(config, Path("dist/config.json"))
+              destination = Path("dist/config.json")
+              if sys.platform == "darwin":
+                  destination = Path("dist/DeadZone.app/Contents/MacOS/config.json")
+              shutil.copy2(config, destination)
 
       - name: 📏 Report package size
         working-directory: engine
