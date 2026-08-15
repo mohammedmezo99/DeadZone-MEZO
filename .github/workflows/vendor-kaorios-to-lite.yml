@@ -89,6 +89,9 @@ jobs:
             exit 1
           fi
 
+          apk_relative="${apk_matches[0]#"$temp_dir/module/"}"
+          echo "::notice::MODULE_APK_PATH=$apk_relative"
+
           cp -a "$(dirname "${apk_matches[0]}")" "$vendor_root/app/KaoriosToolbox"
           cp -p "$temp_dir/$XML_NAME" "$vendor_root/permissions/$XML_NAME"
 
@@ -106,6 +109,7 @@ jobs:
           Kaorios Toolbox ${KAORIOS_VERSION}
           Vendored into DeadZone-xiaomi_Lite for offline/reproducible builds.
           Upstream release: Wuang26/Kaorios-Toolbox ${KAORIOS_VERSION}
+          module apk path: ${apk_relative}
           classes source: ${CLASSES_NAME}
           classes sha256: ${CLASSES_SHA256}
           module source: ${MODULE_NAME}
@@ -137,6 +141,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m 'chore: vendor Kaorios Toolbox V2.0.3 locally'
+          git commit -m 'chore: record Kaorios module install path'
           git pull --rebase origin "$TARGET_BRANCH"
           git push origin "HEAD:$TARGET_BRANCH"
