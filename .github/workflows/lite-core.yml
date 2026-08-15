@@ -189,11 +189,30 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: 🧭 Validate Lite engine layout
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          required_engine_files=(
+            build.sh
+            scripts/environment/setup.sh
+            scripts/notification/notify.py
+            scripts/super/pack_super.sh
+            scripts/package/pack_zip.sh
+            scripts/upload/upload_rom.sh
+          )
+          for engine_file in "${required_engine_files[@]}"; do
+            if [[ ! -s "$engine_file" ]]; then
+              echo "::error::Lite engine contract file is missing or empty: ${engine_file}"
+              exit 1
+            fi
+          done
+
       - name: 📣 Start live tracking
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          if ! python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+          if ! python3 scripts/notification/notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
             echo "::warning::Lite live tracking start event failed; continuing ROM build"
           fi
 
@@ -210,7 +229,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
-          sudo bash -Ee -o pipefail setup.sh 2>&1 | tee setup_action.log
+          sudo bash -Ee -o pipefail scripts/environment/setup.sh 2>&1 | tee setup_action.log
           sudo pip3 install --no-cache-dir requests 2>&1 | tee -a setup_action.log
 
       - name: 🔓 Grant builder permissions
@@ -255,10 +274,10 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          if ! python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+          if ! python3 scripts/notification/notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
             echo "::warning::Lite live tracking pack event failed; continuing ROM packaging"
           fi
-          sudo -E bash packSuper.sh 2>&1 | tee -a build_action.log
+          sudo -E bash scripts/super/pack_super.sh 2>&1 | tee -a build_action.log
 
       - name: 🗜️ Package Final ZIP
         working-directory: toolbuild
@@ -267,7 +286,7 @@ jobs:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
           set -Eeuo pipefail
-          if ! python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+          if ! python3 scripts/notification/notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
             echo "::warning::Lite live tracking upload event failed; continuing ROM upload"
           fi
 
@@ -293,7 +312,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rsync openssh-client curl
           fi
 
-          sudo -E bash packZIP.sh 2>&1 | tee -a build_action.log
+          sudo -E bash scripts/package/pack_zip.sh 2>&1 | tee -a build_action.log
 
       - name: ⬆️ Upload ROM mirrors
         working-directory: toolbuild
@@ -309,7 +328,7 @@ jobs:
           set +a
 
           set +e
-          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash scripts/upload/upload_rom.sh 2>&1 | tee -a build_action.log
           google_status=${PIPESTATUS[0]}
           set -e
 
@@ -341,8 +360,8 @@ jobs:
           PY
           )"
           printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' "$final_size_human" "$final_name" >> "$GITHUB_ENV"
-          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
-          rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/build/.deadzone/state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$PWD/build/.deadzone/state/base_rom_code.txt")"
           if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
             os_folder="${BASH_REMATCH[1]}"
           elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
@@ -385,7 +404,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          if ! python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
+          if ! python3 scripts/notification/notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
             echo "::warning::Lite success live event failed; keeping successful ROM build"
           fi
 
@@ -401,13 +420,14 @@ jobs:
             echo "::warning::Website release skipped: final ZIP name is unavailable"
             exit 0
           }
+          state_dir="$PWD/build/.deadzone/state"
           python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
             --request-id "$DEADZONE_REQUEST_ID" \
             --edition-version "$(tr -d '\r\n' < Version)" \
-            --codename "$(tr -d '\r\n' < bin/ddevice/device_f.txt)" \
-            --rom-version "$(tr -d '\r\n' < bin/ddevice/base_rom_code.txt)" \
-            --android-version "$(tr -d '\r\n' < bin/ddevice/androidver.txt)" \
-            --region "$(tr -d '\r\n' < bin/ddevice/device_type.txt)" \
+            --codename "$(tr -d '\r\n' < "$state_dir/device_f.txt")" \
+            --rom-version "$(tr -d '\r\n' < "$state_dir/base_rom_code.txt")" \
+            --android-version "$(tr -d '\r\n' < "$state_dir/androidver.txt")" \
+            --region "$(tr -d '\r\n' < "$state_dir/device_type.txt")" \
             --filename "$DEADZONE_RESULT_NAME" \
             --artifact-path "$PWD/out/$DEADZONE_RESULT_NAME" \
             --google-drive-url "${DEADZONE_GOOGLE_DRIVE_URL:-}" \
