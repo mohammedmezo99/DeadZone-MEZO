@@ -1,0 +1,251 @@
+name: DeadZone_exe
+
+run-name: 🖥️ DeadZone_exe · main · ${{ github.run_id }}
+
+concurrency:
+  group: deadzone-exe-build-queue
+  queue: max
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/deadzone-exe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: 🧭 Resolve EXE engine
+    runs-on: ubuntu-latest
+    outputs:
+      engine_repository: ${{ steps.engine.outputs.repository }}
+
+    steps:
+      - name: 🔐 Validate launcher credential
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || {
+            echo "::error::Missing shared launcher credential: GH_TOKEN"
+            exit 1
+          }
+
+      - name: 🔒 Checkout central DeadZone repository map
+        uses: actions/checkout@v5
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: projects.env
+          sparse-checkout-cone-mode: false
+
+      - name: 🧩 Resolve DeadZone_EXE repository
+        id: engine
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          mapping = {}
+          for raw_line in Path("runtime/projects.env").read_text(encoding="utf-8").splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, mapped_value = line.split("=", 1)
+              mapping[key.strip()] = mapped_value.strip()
+
+          repository = mapping.get("EXE_REPOSITORY", "")
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+              raise SystemExit("EXE_REPOSITORY is missing or invalid in central projects.env")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"repository={repository}\n")
+
+          print(f"DeadZone EXE engine: {repository}")
+
+  build:
+    name: 🛠️ ${{ matrix.artifact_name }}
+    needs: resolve
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: DeadZone-Windows
+            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-windows.zip https://dl-ssl.google.com/android/repository/platform-tools-latest-windows.zip
+          - os: ubuntu-latest
+            artifact_name: DeadZone-Linux
+            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+          - os: macos-latest
+            artifact_name: DeadZone-macOS-arm64
+            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+          - os: macos-15-intel
+            artifact_name: DeadZone-macOS-x64
+            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: 📥 Checkout DeadZone_EXE main
+        id: engine
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.resolve.outputs.engine_repository }}
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: engine
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 🐍 Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Install build dependencies
+        working-directory: engine
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: 🧪 Compile and test engine
+        working-directory: engine
+        run: |
+          python -m compileall -q app.py build.py core ui
+          python -m pytest -q tests
+
+      - name: 🐧 Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libxcb-cursor0 libegl1 libxkbcommon0
+
+      - name: 🍎 Generate macOS icon
+        if: runner.os == 'macOS'
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          icon_dir="assets/icons"
+          icns_path="${icon_dir}/deadzone_logo.icns"
+          iconset_path="${icon_dir}/deadzone_logo.iconset"
+          source_png=""
+
+          [[ -f "$icns_path" ]] && exit 0
+          if [[ -f "${icon_dir}/deadzone_logo_1024.png" ]]; then
+            source_png="${icon_dir}/deadzone_logo_1024.png"
+          elif [[ -f "${icon_dir}/deadzone_logo.png" ]]; then
+            source_png="${icon_dir}/deadzone_logo.png"
+          else
+            exit 0
+          fi
+
+          rm -rf "$iconset_path"
+          mkdir -p "$iconset_path"
+          sips -z 16 16 "$source_png" --out "${iconset_path}/icon_16x16.png" >/dev/null
+          sips -z 32 32 "$source_png" --out "${iconset_path}/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32 "$source_png" --out "${iconset_path}/icon_32x32.png" >/dev/null
+          sips -z 64 64 "$source_png" --out "${iconset_path}/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128 "$source_png" --out "${iconset_path}/icon_128x128.png" >/dev/null
+          sips -z 256 256 "$source_png" --out "${iconset_path}/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256 "$source_png" --out "${iconset_path}/icon_256x256.png" >/dev/null
+          sips -z 512 512 "$source_png" --out "${iconset_path}/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 "$source_png" --out "${iconset_path}/icon_512x512.png" >/dev/null
+          sips -z 1024 1024 "$source_png" --out "${iconset_path}/icon_512x512@2x.png" >/dev/null
+          iconutil -c icns "$iconset_path" -o "$icns_path"
+          rm -rf "$iconset_path"
+
+      - name: 🏗️ Build DeadZone executable
+        working-directory: engine
+        run: python build.py --clean --onefile
+
+      - name: ⚡ Bundle trusted Android platform-tools
+        working-directory: engine
+        shell: python
+        env:
+          PLATFORM_TOOLS_URLS: ${{ matrix.platform_tools_urls }}
+        run: |
+          import os
+          import shutil
+          import time
+          import urllib.error
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          urls = os.environ["PLATFORM_TOOLS_URLS"].split()
+          archive_path = Path("platform-tools.zip")
+
+          def download(url):
+              for attempt in range(1, 4):
+                  try:
+                      request = urllib.request.Request(
+                          url,
+                          headers={"User-Agent": "DeadZone-exe-Launcher"},
+                      )
+                      with urllib.request.urlopen(request, timeout=60) as response:
+                          with archive_path.open("wb") as output:
+                              shutil.copyfileobj(response, output)
+                      if archive_path.stat().st_size > 0:
+                          return True
+                  except (OSError, urllib.error.URLError) as error:
+                      print(f"Download attempt {attempt} failed for {url}: {error}")
+                      archive_path.unlink(missing_ok=True)
+                      if attempt < 3:
+                          time.sleep(5 * attempt)
+              return False
+
+          if not any(download(url) for url in urls):
+              raise SystemExit("Unable to download Android platform-tools")
+
+          destination = Path("dist/platform-tools")
+          shutil.rmtree(destination, ignore_errors=True)
+          with zipfile.ZipFile(archive_path) as archive:
+              members = [name for name in archive.namelist() if name.startswith("platform-tools/")]
+              if not members:
+                  raise SystemExit("Android platform-tools archive has no platform-tools directory")
+              archive.extractall("dist")
+
+          fastboot = destination / ("fastboot.exe" if os.name == "nt" else "fastboot")
+          if not fastboot.is_file():
+              raise SystemExit(f"Fastboot is missing after extraction: {fastboot}")
+          archive_path.unlink(missing_ok=True)
+
+      - name: 🔧 Set platform-tools permissions
+        if: runner.os != 'Windows'
+        working-directory: engine
+        shell: bash
+        run: chmod +x dist/platform-tools/fastboot
+
+      - name: ⚙️ Copy runtime config
+        working-directory: engine
+        shell: python
+        run: |
+          import shutil
+          from pathlib import Path
+
+          config = Path("config.json")
+          if config.is_file():
+              shutil.copy2(config, Path("dist/config.json"))
+
+      - name: 📤 Upload ${{ matrix.artifact_name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: engine/dist/
+          if-no-files-found: error
+          retention-days: 30
