@@ -31,7 +31,7 @@ jobs:
 
       - name: Compile changed and regression tools
         working-directory: lite
-        run: python -m py_compile scripts/device/collect_rom_metadata.sh scripts/package/apply_flash_slot_overrides.py scripts/verify/verify_slot_and_flash_behavior.py scripts/notification/notify.py scripts/notification/live_event.py scripts/verify/verify_live_event_behavior.py scripts/verify/verify_payload_metadata_behavior.py scripts/verify/verify_partition_reuse_behavior.py scripts/payload/payload_metadata.py scripts/partition/partition_reuse.py scripts/super/super_lpmake_args.py scripts/package/generate_flash_commands.py
+        run: python -m py_compile scripts/package/apply_flash_slot_overrides.py scripts/verify/verify_slot_and_flash_behavior.py scripts/notification/notify.py scripts/notification/live_event.py scripts/verify/verify_live_event_behavior.py scripts/verify/verify_payload_metadata_behavior.py scripts/verify/verify_partition_reuse_behavior.py scripts/payload/payload_metadata.py scripts/partition/partition_reuse.py scripts/super/super_lpmake_args.py scripts/package/generate_flash_commands.py
 
       - name: Test slot and flash layout behavior
         working-directory: lite
