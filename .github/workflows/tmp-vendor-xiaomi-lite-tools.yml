@@ -53,10 +53,10 @@ jobs:
 
           curl -fL 'https://raw.githubusercontent.com/ssut/payload-dumper-go/c4effb7bbb0d097f11110f620948daf92ab362fc/LICENSE' -o tools/licenses/Apache-2.0.txt
 
-          tools/linux/x86_64/payload-dumper-go --help > "$stage/payload-help"
+          tools/linux/x86_64/payload-dumper-go --help > "$stage/payload-help" 2>&1
           grep -qi payload "$stage/payload-help"
           python -m compileall -q tools/python/liblp
-          PYTHONPATH="$PWD/tools/python" python -m liblp.partition_tools.lpunpack --help > "$stage/lp-help"
+          PYTHONPATH="$PWD/tools/python" python -m liblp.partition_tools.lpunpack --help > "$stage/lp-help" 2>&1
           grep -qi 'extracting partition images from super' "$stage/lp-help"
 
           find tools -type d -name __pycache__ -prune -exec rm -rf {} +
