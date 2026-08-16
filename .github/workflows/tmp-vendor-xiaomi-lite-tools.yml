@@ -11,12 +11,10 @@ permissions:
 
 jobs:
   vendor-tools:
-    name: Vendor Xiaomi Lite tools
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Checkout Xiaomi Lite
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: mohammedmezo99/xiaomi_Lite
           ref: main
@@ -24,169 +22,100 @@ jobs:
           path: lite
           fetch-depth: 0
 
-      - name: Verify target baseline
+      - name: Vendor pinned Phase 2B tools
         working-directory: lite
         shell: bash
         run: |
           set -euo pipefail
           expected='ad158a108fa2c79dc0863ac0f9a2d50963303bd7'
-          actual="$(git rev-parse HEAD)"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::xiaomi_Lite main changed unexpectedly. expected=$expected actual=$actual"
-            exit 1
-          fi
-
-      - name: Vendor pinned tools
-        working-directory: lite
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PAYLOAD_VERSION='2.0.0'
-          PAYLOAD_COMMIT='c4effb7bbb0d097f11110f620948daf92ab362fc'
-          PAYLOAD_ARCHIVE_SHA256='ac3f27435e0c88d4b552f343765f78fa44b552e4cd9892ff492fff929a1c4e6e'
-          PAYLOAD_URL='https://github.com/ssut/payload-dumper-go/releases/download/2.0.0/payload-dumper-go_2.0.0_linux_amd64.tar.gz'
-
-          LIBLP_VERSION='1.0.2'
-          LIBLP_COMMIT='690849754888b2a624bd4c30b8a3c37416a50a75'
-          LIBLP_REPO='https://github.com/sebaubuntu-python/liblp.git'
+          [[ "$(git rev-parse HEAD)" == "$expected" ]] || { echo '::error::xiaomi_Lite main changed'; exit 1; }
 
           stage="$(mktemp -d)"
           trap 'rm -rf "$stage"' EXIT
-
           rm -rf tools
           mkdir -p tools/linux/x86_64 tools/python tools/licenses
 
-          curl --proto '=https' --tlsv1.2 -fL --retry 4 --retry-all-errors \
-            "$PAYLOAD_URL" -o "$stage/payload.tar.gz"
-          printf '%s  %s\n' "$PAYLOAD_ARCHIVE_SHA256" "$stage/payload.tar.gz" | sha256sum -c -
-          mkdir -p "$stage/payload"
+          payload_url='https://github.com/ssut/payload-dumper-go/releases/download/2.0.0/payload-dumper-go_2.0.0_linux_amd64.tar.gz'
+          payload_archive_sha='ac3f27435e0c88d4b552f343765f78fa44b552e4cd9892ff492fff929a1c4e6e'
+          curl -fL --retry 4 --retry-all-errors "$payload_url" -o "$stage/payload.tar.gz"
+          echo "$payload_archive_sha  $stage/payload.tar.gz" | sha256sum -c -
+          mkdir "$stage/payload"
           tar -xzf "$stage/payload.tar.gz" -C "$stage/payload"
           payload_bin="$(find "$stage/payload" -type f -name payload-dumper-go -print -quit)"
-          [[ -n "$payload_bin" && -f "$payload_bin" ]]
+          [[ -f "$payload_bin" ]]
           install -m 0755 "$payload_bin" tools/linux/x86_64/payload-dumper-go
 
-          git clone --quiet --filter=blob:none --no-checkout "$LIBLP_REPO" "$stage/liblp-src"
-          git -C "$stage/liblp-src" checkout --quiet "$LIBLP_COMMIT"
-          [[ "$(git -C "$stage/liblp-src" rev-parse HEAD)" == "$LIBLP_COMMIT" ]]
-          cp -a "$stage/liblp-src/liblp" tools/python/liblp
-          cp "$stage/liblp-src/pyproject.toml" tools/python/liblp.pyproject.toml
+          git clone --quiet https://github.com/sebaubuntu-python/liblp.git "$stage/liblp"
+          git -C "$stage/liblp" checkout --quiet 690849754888b2a624bd4c30b8a3c37416a50a75
+          [[ "$(git -C "$stage/liblp" rev-parse HEAD)" == '690849754888b2a624bd4c30b8a3c37416a50a75' ]]
+          cp -a "$stage/liblp/liblp" tools/python/liblp
+          cp "$stage/liblp/pyproject.toml" tools/python/liblp.pyproject.toml
 
-          curl --proto '=https' --tlsv1.2 -fL --retry 4 --retry-all-errors \
-            "https://raw.githubusercontent.com/ssut/payload-dumper-go/${PAYLOAD_COMMIT}/LICENSE" \
-            -o tools/licenses/Apache-2.0.txt
+          curl -fL 'https://raw.githubusercontent.com/ssut/payload-dumper-go/c4effb7bbb0d097f11110f620948daf92ab362fc/LICENSE' -o tools/licenses/Apache-2.0.txt
 
-          tools/linux/x86_64/payload-dumper-go --help > "$stage/payload-help.txt"
-          grep -qi 'payload' "$stage/payload-help.txt"
+          tools/linux/x86_64/payload-dumper-go --help > "$stage/payload-help"
+          grep -qi payload "$stage/payload-help"
           python -m compileall -q tools/python/liblp
-          PYTHONPATH="$PWD/tools/python" python -m liblp.partition_tools.lpunpack --help > "$stage/lpunpack-help.txt"
-          grep -qi 'extracting partition images from super' "$stage/lpunpack-help.txt"
-
-          payload_sha="$(sha256sum tools/linux/x86_64/payload-dumper-go | awk '{print $1}')"
-          liblp_tree_sha="$(python - <<'PY'
-          import hashlib
-          from pathlib import Path
-          root = Path('tools/python/liblp')
-          digest = hashlib.sha256()
-          for path in sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts):
-              rel = path.relative_to(root).as_posix().encode()
-              data = path.read_bytes()
-              digest.update(len(rel).to_bytes(4, 'big'))
-              digest.update(rel)
-              digest.update(len(data).to_bytes(8, 'big'))
-              digest.update(data)
-          print(digest.hexdigest())
-          PY
-          )"
+          PYTHONPATH="$PWD/tools/python" python -m liblp.partition_tools.lpunpack --help > "$stage/lp-help"
+          grep -qi 'extracting partition images from super' "$stage/lp-help"
 
           find tools -type d -name __pycache__ -prune -exec rm -rf {} +
           find tools -type f -name '*.pyc' -delete
 
-          python - "$payload_sha" "$liblp_tree_sha" <<'PY'
-          import json
-          import sys
+          payload_sha="$(sha256sum tools/linux/x86_64/payload-dumper-go | awk '{print $1}')"
+          liblp_sha="$(python - <<'PY'
+          import hashlib
           from pathlib import Path
+          root=Path('tools/python/liblp'); h=hashlib.sha256()
+          for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              r=p.relative_to(root).as_posix().encode(); d=p.read_bytes()
+              h.update(len(r).to_bytes(4,'big')+r+len(d).to_bytes(8,'big')+d)
+          print(h.hexdigest())
+          PY
+          )"
 
-          payload_sha, liblp_tree_sha = sys.argv[1:]
-          manifest = {
-              'schema': 1,
-              'tools': [
-                  {
-                      'name': 'payload-dumper-go',
-                      'version': '2.0.0',
-                      'platform': 'linux',
-                      'architecture': 'x86_64',
-                      'path': 'tools/linux/x86_64/payload-dumper-go',
-                      'sha256': payload_sha,
-                      'source': 'https://github.com/ssut/payload-dumper-go',
-                      'source_ref': 'c4effb7bbb0d097f11110f620948daf92ab362fc',
-                      'release_archive_sha256': 'ac3f27435e0c88d4b552f343765f78fa44b552e4cd9892ff492fff929a1c4e6e',
-                      'license': 'Apache-2.0',
-                      'purpose': 'Extract Android OTA payload.bin partitions',
-                  },
-                  {
-                      'name': 'liblp',
-                      'version': '1.0.2',
-                      'platform': 'python>=3.8',
-                      'architecture': 'any',
-                      'path': 'tools/python/liblp',
-                      'tree_sha256': liblp_tree_sha,
-                      'source': 'https://github.com/sebaubuntu-python/liblp',
-                      'source_ref': '690849754888b2a624bd4c30b8a3c37416a50a75',
-                      'license': 'Apache-2.0',
-                      'purpose': 'Read Android LP metadata and extract logical partitions from raw Super images',
-                  },
-              ],
-              'notes': {
-                  'sparse_images': 'xiaomi_Lite already owns Android sparse parsing; sparse-to-raw normalization will be implemented and verified inside Phase 2B rather than vendoring an unlicensed third-party Super binary.',
-                  'network_at_build_time': 'Production builds must use these vendored tools and must not download critical extraction tools at runtime.'
-              },
+          python - "$payload_sha" "$liblp_sha" <<'PY'
+          import json,sys
+          from pathlib import Path
+          psha,lsha=sys.argv[1:]
+          data={
+            'schema':1,
+            'tools':[
+              {'name':'payload-dumper-go','version':'2.0.0','platform':'linux','architecture':'x86_64','path':'tools/linux/x86_64/payload-dumper-go','sha256':psha,'source':'https://github.com/ssut/payload-dumper-go','source_ref':'c4effb7bbb0d097f11110f620948daf92ab362fc','release_archive_sha256':'ac3f27435e0c88d4b552f343765f78fa44b552e4cd9892ff492fff929a1c4e6e','license':'Apache-2.0','purpose':'Extract payload.bin partitions'},
+              {'name':'liblp','version':'1.0.2','platform':'python>=3.8','architecture':'any','path':'tools/python/liblp','tree_sha256':lsha,'source':'https://github.com/sebaubuntu-python/liblp','source_ref':'690849754888b2a624bd4c30b8a3c37416a50a75','license':'Apache-2.0','purpose':'Read LP metadata and extract logical partitions from raw Super images'}
+            ],
+            'notes':{'sparse_images':'Sparse parsing is already owned by xiaomi_Lite; Phase 2B will add and verify fail-closed sparse-to-raw normalization instead of vendoring an unlicensed Super binary.','runtime_downloads':'Critical extraction tools must be used from this repository, not downloaded during production builds.'}
           }
-          Path('tools/manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          Path('tools/manifest.json').write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
           PY
 
           cat > tools/README.md <<'EOF'
-          # Xiaomi Lite vendored extraction tools
-
-          Critical Phase 2B extraction dependencies are stored in this repository so production ROM preparation does not depend on downloading critical tooling at build time.
-
-          - `payload-dumper-go` 2.0.0: pinned Linux x86_64 upstream release for `payload.bin` extraction.
-          - `liblp` 1.0.2: pinned Apache-2.0 Python LP metadata reader/extractor. The vendored package supports explicit LP metadata slot selection with `-S`.
-
-          `tools/manifest.json` records the exact source refs and integrity values. Runtime integration must verify those values before executing/using a critical tool.
-
-          No third-party Super binary without an explicit license is vendored. Android sparse normalization remains owned by the xiaomi_Lite implementation and must fail closed until its Phase 2B verification gate passes.
+          # Vendored extraction tools
+          Phase 2B critical extraction dependencies live here so production builds do not download them at runtime.
+          `payload-dumper-go` 2.0.0 is pinned for OTA payload extraction.
+          `liblp` 1.0.2 is pinned for LP metadata and Super logical partition extraction, including explicit metadata slot selection.
+          Integrity and provenance are recorded in `tools/manifest.json`.
           EOF
 
-          # Remove the failed private-repo vendor workflow; this public launcher replaces it.
           rm -f .github/workflows/vendor-phase2b-tools.yml
 
           python - <<'PY'
-          import hashlib
-          import json
+          import hashlib,json
           from pathlib import Path
-
-          manifest = json.loads(Path('tools/manifest.json').read_text(encoding='utf-8'))
-          payload = next(item for item in manifest['tools'] if item['name'] == 'payload-dumper-go')
-          actual = hashlib.sha256(Path(payload['path']).read_bytes()).hexdigest()
-          if actual != payload['sha256']:
-              raise SystemExit(f"payload binary hash mismatch: {actual} != {payload['sha256']}")
-          if any(Path('tools').rglob('__pycache__')) or any(Path('tools').rglob('*.pyc')):
-              raise SystemExit('temporary Python cache remained under tools/')
+          m=json.loads(Path('tools/manifest.json').read_text())
+          p=next(x for x in m['tools'] if x['name']=='payload-dumper-go')
+          assert hashlib.sha256(Path(p['path']).read_bytes()).hexdigest()==p['sha256']
+          assert not list(Path('tools').rglob('__pycache__'))
+          assert not list(Path('tools').rglob('*.pyc'))
           print('VENDORED_TOOL_VERIFICATION_PASS')
           PY
 
-      - name: Commit tools to Xiaomi Lite main
+      - name: Commit to Xiaomi Lite main
         working-directory: lite
-        shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A tools .github/workflows/vendor-phase2b-tools.yml
-          if git diff --cached --quiet; then
-            echo 'No changes to commit.'
-            exit 0
-          fi
           git commit -m 'chore: vendor pinned Phase 2B extraction tools'
           git push origin HEAD:main
