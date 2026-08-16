@@ -1,0 +1,66 @@
+name: Phase 2B Closure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase2b-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    name: Verify Phase 2B and publish atomically
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout launcher main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Reconstruct exact verification bundle
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?GH_TOKEN repository secret is required}"
+          : > /tmp/phase2b-bundle.b64
+          for sha in \
+            744e801fdd4f70493cbbdd8247ea299cbed3b858 \
+            b54683a1fdc83064f9adf277f363316946adfb2a \
+            1ca5ca6dce7b820933ee724afb87577324df1388 \
+            fa0153648a00ac6747c507429d67e7296943c6ea \
+            2fdd395d866ca2915b9d790fcb5409b259850f9c \
+            e473f721c0beb61034ce7a57f227a00848fee96e \
+            5cff2483aef3d574c0ace9ceb54e555a0140a1e9 \
+            fa2b6c5c8b51bed111855359fc9a9d57eac0f9f2
+          do
+            gh api "repos/mohammedmezo99/DeadZone-MEZO/git/blobs/$sha" --jq .content \
+              | tr -d '\n' | base64 -d >> /tmp/phase2b-bundle.b64
+          done
+          base64 -d /tmp/phase2b-bundle.b64 > /tmp/phase2b-bundle.tgz
+          printf '%s  %s\n' '62720c863fee8329b5b4c2c773b2c4990544c7cd264a16bb004345887ded74d7' /tmp/phase2b-bundle.tgz | sha256sum -c -
+          mkdir -p /tmp/phase2b-bundle
+          tar -xzf /tmp/phase2b-bundle.tgz -C /tmp/phase2b-bundle --no-same-owner
+          chmod 700 /tmp/phase2b-bundle/runner.sh
+          echo 'BUNDLE_VERIFIED_SHA256=62720c863fee8329b5b4c2c773b2c4990544c7cd264a16bb004345887ded74d7'
+
+      - name: Execute external Phase 2B authority
+        run: /tmp/phase2b-bundle/runner.sh
+
+      - name: Remove temporary launcher workflow from main
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull --ff-only origin main
+          if [[ -f .github/workflows/phase2b-closure.yml ]]; then
+            git rm .github/workflows/phase2b-closure.yml
+            git commit -m 'chore: remove temporary Phase 2B verifier'
+            git push origin HEAD:main
+          fi
