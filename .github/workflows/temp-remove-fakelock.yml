@@ -1,0 +1,136 @@
+name: Temporary Remove Kaorios FakeLock
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-remove-fakelock.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source mod
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: source
+          fetch-depth: 1
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            mods/Package/KaoriosToolbox/apply.sh
+
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: target
+          fetch-depth: 1
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            bin/package/KaoriosToolbox/apply.sh
+            bin/package/patchpackage.sh
+
+      - name: Derive Kaorios without FakeLock only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path('source/mods/Package/KaoriosToolbox/apply.sh')
+          target = Path('target/bin/package/KaoriosToolbox/apply.sh')
+          text = source.read_text(encoding='utf-8')
+
+          exact_lines = (
+              'KAORIOS_FAKELOCK_SCRIPT="$module_root/fakelock.sh"\n',
+              'KAORIOS_FAKELOCK_TOOL="$module_root/fakelock_patch.py"\n',
+              'KAORIOS_FAKELOCK_BUILD_PROP="$module_root/props/build.prop"\n',
+              'KAORIOS_FAKELOCK_CUST_PROP="$module_root/props/cust.prop"\n',
+              '    validate_fakelock_assets || return 1\n',
+              '    bash "$KAORIOS_FAKELOCK_SCRIPT" || return 1\n',
+          )
+          for line in exact_lines:
+              if text.count(line) != 1:
+                  raise SystemExit(f'expected exactly one FakeLock line: {line!r}')
+              text = text.replace(line, '', 1)
+
+          pattern = r'\nvalidate_fakelock_assets\(\) \{\n.*?\n\}\n\n(?=set_api_level\(\))'
+          text, count = re.subn(pattern, '\n', text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit('expected exactly one validate_fakelock_assets function')
+
+          if 'FAKELOCK' in text.upper() or 'fakelock' in text:
+              raise SystemExit('FakeLock reference remains in apply.sh')
+
+          target.write_text(text, encoding='utf-8')
+          PY
+          bash -n target/bin/package/KaoriosToolbox/apply.sh
+          ! grep -q 'NOTIFICATION_FIX' target/bin/package/patchpackage.sh
+
+      - name: Commit exact cleanup to target main
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- bin/package/KaoriosToolbox/apply.sh
+          git diff --cached --check
+          git diff --cached -- bin/package/KaoriosToolbox/apply.sh
+          if git diff --cached --quiet; then
+            echo "Kaorios apply.sh already matches requested state"
+          else
+            git commit -m "package: remove Kaorios FakeLock integration"
+            git push origin HEAD:main
+          fi
+
+      - name: Verify target from fresh main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf verify
+          git clone --depth=1 --branch main "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Lite.git" verify >/dev/null 2>&1
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path('source/mods/Package/KaoriosToolbox/apply.sh').read_text(encoding='utf-8')
+          exact_lines = (
+              'KAORIOS_FAKELOCK_SCRIPT="$module_root/fakelock.sh"\n',
+              'KAORIOS_FAKELOCK_TOOL="$module_root/fakelock_patch.py"\n',
+              'KAORIOS_FAKELOCK_BUILD_PROP="$module_root/props/build.prop"\n',
+              'KAORIOS_FAKELOCK_CUST_PROP="$module_root/props/cust.prop"\n',
+              '    validate_fakelock_assets || return 1\n',
+              '    bash "$KAORIOS_FAKELOCK_SCRIPT" || return 1\n',
+          )
+          expected = source
+          for line in exact_lines:
+              expected = expected.replace(line, '', 1)
+          expected, count = re.subn(
+              r'\nvalidate_fakelock_assets\(\) \{\n.*?\n\}\n\n(?=set_api_level\(\))',
+              '\n', expected, count=1, flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit('verification transform failed')
+          actual = Path('verify/bin/package/KaoriosToolbox/apply.sh').read_text(encoding='utf-8')
+          if actual != expected:
+              raise SystemExit('Kaorios apply.sh differs beyond FakeLock removal')
+          patchpackage = Path('verify/bin/package/patchpackage.sh').read_text(encoding='utf-8')
+          if 'NOTIFICATION_FIX' in patchpackage:
+              raise SystemExit('NOTIFICATION_FIX is still wired in patchpackage.sh')
+          print('Verified: only FakeLock removed; NOTIFICATION_FIX not wired')
+          PY
+          bash -n verify/bin/package/KaoriosToolbox/apply.sh
+          bash -n verify/bin/package/patchpackage.sh
