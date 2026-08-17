@@ -1,0 +1,189 @@
+name: Temporary Copy Three Package Mods
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-copy-three-package-mods.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source mods
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: source
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            mods/Package/Fix notification in CN ROM
+            mods/Package/Hide4G_MiuiSystemUI
+            mods/Package/KaoriosToolbox
+
+      - name: Checkout target package
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: target
+          fetch-depth: 1
+          lfs: true
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            bin/package
+
+      - name: Copy requested mods exactly
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in "Fix notification in CN ROM" "Hide4G_MiuiSystemUI" "KaoriosToolbox"; do
+            src="$GITHUB_WORKSPACE/source/mods/Package/$name"
+            dst="$GITHUB_WORKSPACE/target/bin/package/$name"
+            test -d "$src"
+            test ! -e "$dst"
+            cp -a -- "$src" "$dst"
+          done
+
+      - name: Verify byte-for-byte transfer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, os, stat
+          from pathlib import Path
+
+          names = ("Fix notification in CN ROM", "Hide4G_MiuiSystemUI", "KaoriosToolbox")
+
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def snapshot(root):
+              entries = {}
+              for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+                  base_path = Path(base)
+                  for name in sorted(dirs + files):
+                      path = base_path / name
+                      rel = path.relative_to(root).as_posix()
+                      mode = stat.S_IMODE(path.lstat().st_mode)
+                      if path.is_symlink():
+                          entries[rel] = ("symlink", mode, os.readlink(path))
+                      elif path.is_dir():
+                          entries[rel] = ("dir", mode)
+                      elif path.is_file():
+                          entries[rel] = ("file", mode, path.stat().st_size, digest(path))
+              return entries
+
+          total = 0
+          for mod_name in names:
+              src = Path("source/mods/Package") / mod_name
+              dst = Path("target/bin/package") / mod_name
+              src_state = snapshot(src)
+              if src_state != snapshot(dst):
+                  raise SystemExit(f"Exact-copy verification failed: {mod_name}")
+              count = sum(1 for entry in src_state.values() if entry[0] == "file")
+              total += count
+              print(f"Verified {mod_name}: {count} files")
+          print(f"Verified exact transfer: {total} files total")
+          PY
+
+      - name: Wire mods in patchpackage only
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > bin/package/patchpackage.sh <<'EOF'
+          work_dir=$(pwd)
+          source $work_dir/functions.sh
+
+          mods "Add Package..."
+          target_dir="$work_dir/bin/package/"
+
+          bash "$target_dir/Disable Signature Verification/update.sh"
+          bash "$target_dir/KaoriosToolbox/apply.sh"
+          bash $target_dir/DISABLE_AVB/DISABLEavb.sh
+          bash $target_dir/KouseiPatcher/update.sh
+          bash $target_dir/NOTIFICATION_FIX/notificationFIX.sh
+          bash $target_dir/RefreshRate/1hz.sh
+          bash $target_dir/ResetProp/update.sh
+          bash "$target_dir/Hide4G_MiuiSystemUI/apply.sh"
+          bash "$target_dir/Fix notification in CN ROM/apply.sh"
+          mods "Add Package Done"
+          EOF
+          bash -n bin/package/patchpackage.sh
+          grep -F 'bash "$target_dir/KaoriosToolbox/apply.sh"' bin/package/patchpackage.sh
+          grep -F 'bash "$target_dir/Hide4G_MiuiSystemUI/apply.sh"' bin/package/patchpackage.sh
+          grep -F 'bash "$target_dir/Fix notification in CN ROM/apply.sh"' bin/package/patchpackage.sh
+
+      - name: Commit to target main
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "bin/package/Fix notification in CN ROM" "bin/package/Hide4G_MiuiSystemUI" "bin/package/KaoriosToolbox" "bin/package/patchpackage.sh"
+          git diff --cached --name-status
+          git commit -m "package: add notification, statusbar, and Kaorios mods"
+          git push origin HEAD:main
+          echo "TARGET_COMMIT=$(git rev-parse HEAD)"
+
+      - name: Verify target main after push
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf verify
+          git clone --depth=1 --branch main "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Lite.git" verify >/dev/null 2>&1
+          python3 - <<'PY'
+          import hashlib, os, stat
+          from pathlib import Path
+
+          names = ("Fix notification in CN ROM", "Hide4G_MiuiSystemUI", "KaoriosToolbox")
+
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def snapshot(root):
+              entries = {}
+              for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+                  base_path = Path(base)
+                  for name in sorted(dirs + files):
+                      path = base_path / name
+                      rel = path.relative_to(root).as_posix()
+                      mode = stat.S_IMODE(path.lstat().st_mode)
+                      if path.is_symlink():
+                          entries[rel] = ("symlink", mode, os.readlink(path))
+                      elif path.is_dir():
+                          entries[rel] = ("dir", mode)
+                      elif path.is_file():
+                          entries[rel] = ("file", mode, path.stat().st_size, digest(path))
+              return entries
+
+          for mod_name in names:
+              src = Path("source/mods/Package") / mod_name
+              dst = Path("verify/bin/package") / mod_name
+              if snapshot(src) != snapshot(dst):
+                  raise SystemExit(f"Post-push verification failed: {mod_name}")
+          print("Post-push exact-copy verification passed for all three mods")
+          PY
+          bash -n verify/bin/package/patchpackage.sh
