@@ -126,7 +126,7 @@ jobs:
             fi
           done
           chmod 700 runtime/load-build.sh runtime/upload-mirrors.sh
-          python3 -m py_compile runtime/publish-website-release.py
+          python3 -m py_compile runtime/report_build_event.py runtime/publish-website-release.py
           runtime/load-build.sh lite
 
       - name: ✅ Validate loaded runtime
@@ -157,7 +157,6 @@ jobs:
           fi
           printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
           printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
-          printf 'RCLONE_CONFIG_BASE64=\n' >> "$GITHUB_ENV"
 
       - name: 💾 Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
@@ -178,7 +177,7 @@ jobs:
           sudo apt-get autoremove --purge -y || true
           sudo apt-get clean
 
-      - name: 📦 Checkout private builder source
+      - name: 📦 Checkout private Lite engine
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.runtime.outputs.engine_repository }}
@@ -195,26 +194,26 @@ jobs:
           set -euo pipefail
           required_engine_files=(
             build.sh
-            scripts/environment/setup.sh
-            scripts/notification/notify.py
-            scripts/super/pack_super.sh
-            scripts/package/pack_zip.sh
-            scripts/upload/upload_rom.sh
+            functions.sh
+            notify.py
+            packROM.sh
+            uploadROM.sh
           )
           for engine_file in "${required_engine_files[@]}"; do
             if [[ ! -s "$engine_file" ]]; then
-              echo "::error::Lite engine contract file is missing or empty: ${engine_file}"
+              echo "::error::Lite engine file is missing or empty: ${engine_file}"
               exit 1
             fi
           done
+          python3 -m py_compile notify.py
+          bash -n uploadROM.sh
+          bash -n packROM.sh
 
       - name: 📣 Start live tracking
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          if ! python3 scripts/notification/notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
-            echo "::warning::Lite live tracking start event failed; continuing ROM build"
-          fi
+          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
@@ -225,12 +224,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧰 Install builder dependencies
+      - name: 🧰 Install Lite dependencies
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
-          sudo bash -Ee -o pipefail scripts/environment/setup.sh 2>&1 | tee setup_action.log
-          sudo pip3 install --no-cache-dir requests 2>&1 | tee -a setup_action.log
+          sudo apt-get update
+          sudo apt-get purge -y device-tree-compiler || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq rclone python-is-python3 wget python3 python3-pip \
+            lz4 xz-utils zlib1g-dev gcc g++ libc6 libstdc++6 \
+            busybox zip unzip p7zip-full zipalign zstd bc erofs-utils \
+            android-sdk-libsparse-utils xmlstarlet aapt rsync openssh-client curl
+          sudo pip3 install --break-system-packages --no-cache-dir ConfigObj lz4 zstandard setuptools || \
+            sudo pip3 install --no-cache-dir ConfigObj lz4 zstandard setuptools
 
       - name: 🔓 Grant builder permissions
         working-directory: toolbuild
@@ -242,54 +248,77 @@ jobs:
           set -euo pipefail
           source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
           target_file="$PWD/rclone.conf"
-
-          if [[ ! -s "$source_file" ]]; then
+          [[ -s "$source_file" ]] || {
             echo "::error::Central rclone.conf is missing or empty"
             exit 1
-          fi
-
+          }
           install -m 600 "$source_file" "$target_file"
-
-          if ! command -v rclone >/dev/null 2>&1; then
-            echo "rclone was not installed by builder setup; installing fallback package"
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone
-          fi
-
           if ! rclone --config="$target_file" listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
             echo "::error::Central rclone.conf does not define expected remote: ${RCLONE_REMOTE_NAME}"
             exit 1
           fi
-
           rclone version
-          echo "Rclone configuration installed for remote: ${RCLONE_REMOTE_NAME}"
 
       - name: 🚀 Build ROM
         working-directory: toolbuild
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log
 
       - name: 📦 Pack Super
         working-directory: toolbuild
         run: |
-          set -euo pipefail
-          if ! python3 scripts/notification/notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
-            echo "::warning::Lite live tracking pack event failed; continuing ROM packaging"
-          fi
-          sudo -E bash scripts/super/pack_super.sh 2>&1 | tee -a build_action.log
+          set -Eeuo pipefail
+          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
+          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
-      - name: 🗜️ Package Final ZIP
+      - name: 🗜️ Package and upload Google Drive
+        working-directory: toolbuild
+        run: |
+          set -Eeuo pipefail
+          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
+
+          set +e
+          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+          google_status=${PIPESTATUS[0]}
+          set -e
+          printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
+
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Lite_*.zip' -print 2>/dev/null)
+          if (( ${#final_zips[@]} != 1 )); then
+            echo "::error::Expected exactly one preserved final Lite ZIP; found ${#final_zips[@]}"
+            exit 1
+          fi
+
+          final_zip="${final_zips[0]}"
+          final_name="$(basename "$final_zip")"
+          python3 -m zipfile -t "$final_zip" >/dev/null || {
+            echo "::error::Final Lite ZIP failed archive integrity validation: ${final_name}"
+            exit 1
+          }
+
+          final_size_bytes="$(stat -c '%s' "$final_zip")"
+          final_size_human="$(python3 - "$final_size_bytes" <<'PY'
+          import sys
+          size = int(sys.argv[1])
+          value = float(size)
+          for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+              if value < 1024 or unit == "TiB":
+                  print(f"{size} B" if unit == "B" else f"{value:.2f} {unit}")
+                  break
+              value /= 1024
+          PY
+          )"
+          printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' \
+            "$final_size_human" "$final_name" >> "$GITHUB_ENV"
+
+      - name: ⬆️ Upload SourceForge and PixelDrain
         working-directory: toolbuild
         env:
           SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
           set -Eeuo pipefail
-          if ! python3 scripts/notification/notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
-            echo "::warning::Lite live tracking upload event failed; continuing ROM upload"
-          fi
-
           set -a
           # shellcheck disable=SC1091
           source "$GITHUB_WORKSPACE/runtime/upload.env"
@@ -303,84 +332,39 @@ jobs:
             fi
           done
 
-          missing_packages=0
-          for command_name in rsync sftp ssh-keyscan ssh-keygen curl; do
-            command -v "$command_name" >/dev/null 2>&1 || missing_packages=1
-          done
-          if (( missing_packages != 0 )); then
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rsync openssh-client curl
-          fi
-
-          sudo -E bash scripts/package/pack_zip.sh 2>&1 | tee -a build_action.log
-
-      - name: ⬆️ Upload ROM mirrors
-        working-directory: toolbuild
-        env:
-          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
-          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
-        run: |
-          set -Eeuo pipefail
-
-          set -a
-          # shellcheck disable=SC1091
-          source "$GITHUB_WORKSPACE/runtime/upload.env"
-          set +a
-
-          set +e
-          sudo -E bash scripts/upload/upload_rom.sh 2>&1 | tee -a build_action.log
-          google_status=${PIPESTATUS[0]}
-          set -e
-
           mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Lite_*.zip' -print 2>/dev/null)
-          if (( ${#final_zips[@]} != 1 )); then
-            echo "::error::Expected exactly one preserved final Lite ZIP; found ${#final_zips[@]}"
-            sudo rm -rf "$PWD/out" "$PWD/build"
+          (( ${#final_zips[@]} == 1 )) || {
+            echo "::error::Final Lite ZIP is unavailable for mirror upload"
             exit 1
-          fi
-
+          }
           final_zip="${final_zips[0]}"
           final_name="$(basename "$final_zip")"
 
-          if ! python3 -m zipfile -t "$final_zip" >/dev/null; then
-            echo "::error::Final Lite ZIP failed archive integrity validation: ${final_name}"
-            sudo rm -rf "$PWD/out" "$PWD/build"
-            exit 1
-          fi
-          final_size_bytes="$(stat -c '%s' "$final_zip")"
-          final_size_human="$(python3 - "$final_size_bytes" <<'PY'
-          import sys
-          size = int(sys.argv[1])
-          value = float(size)
-          for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-              if value < 1024 or unit == "TiB":
-                  print(f"{size} B" if unit == "B" else f"{value:.2f} {unit}")
-                  break
-              value /= 1024
-          PY
-          )"
-          printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' "$final_size_human" "$final_name" >> "$GITHUB_ENV"
-          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/build/.deadzone/state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
-          rom_version="$(tr -d '\r\n' < "$PWD/build/.deadzone/state/base_rom_code.txt")"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
           if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
             os_folder="${BASH_REMATCH[1]}"
           elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
             os_folder="MIUI${BASH_REMATCH[1]}"
           else
             echo "::error::Unable to derive mirror OS folder from ROM version: ${rom_version}"
-            sudo rm -rf "$PWD/out" "$PWD/build"
             exit 1
           fi
 
-          if (( google_status == 0 )); then
+          google_status="${DEADZONE_GOOGLE_UPLOAD_STATUS:-1}"
+          drive_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
+          if (( google_status == 0 )) && [[ -z "$drive_url" ]]; then
             drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/Lite/${codename}/${os_folder}/${final_name}"
             drive_url="$(rclone --config="$PWD/rclone.conf" link "$drive_remote" 2>/dev/null | tail -n1 | tr -d '\r' || true)"
             if [[ -n "$drive_url" ]]; then
-              printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\n' "$drive_url" >> "$GITHUB_ENV"
+              printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\nDEADZONE_RESULT_URL=%s\n' "$drive_url" "$drive_url" >> "$GITHUB_ENV"
             fi
+          fi
+
+          if (( google_status == 0 )) && [[ -n "$drive_url" ]]; then
             export DEADZONE_SET_RESULT_URL=0
           else
-            echo "::warning::Google Drive upload did not complete; secondary mirrors will be allowed to rescue the release"
+            echo "::warning::Google Drive is unavailable as a final public link; secondary mirrors may rescue the release"
             export DEADZONE_SET_RESULT_URL=1
           fi
 
@@ -404,9 +388,7 @@ jobs:
         working-directory: toolbuild
         run: |
           set -euo pipefail
-          if ! python3 scripts/notification/notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"; then
-            echo "::warning::Lite success live event failed; keeping successful ROM build"
-          fi
+          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
       - name: 🌐 Publish Lite release to website
         if: success()
@@ -420,7 +402,7 @@ jobs:
             echo "::warning::Website release skipped: final ZIP name is unavailable"
             exit 0
           }
-          state_dir="$PWD/build/.deadzone/state"
+          state_dir="$PWD/bin/ddevice"
           python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
             --request-id "$DEADZONE_REQUEST_ID" \
             --edition-version "$(tr -d '\r\n' < Version)" \
@@ -474,7 +456,7 @@ jobs:
             --project lite \
             --message "DeadZone Lite ROM build cancelled."
 
-      - name: 🧽 Remove private runtime files
+      - name: 🧽 Cleanup Lite workspace
         if: always()
         run: |
           sudo rm -rf toolbuild/out toolbuild/build
