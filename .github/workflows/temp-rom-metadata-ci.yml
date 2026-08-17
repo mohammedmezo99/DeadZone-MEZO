@@ -24,9 +24,40 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: lite
 
-      - name: Verify Lite shell syntax
+      - name: Verify Lite syntax and live source URL
         working-directory: lite
-        run: bash -n bin/ddevice/fetchINFO.sh
+        run: |
+          set -Eeuo pipefail
+          bash -n build.sh
+          bash -n bin/ddevice/fetchINFO.sh
+          python3 -m py_compile notify.py
+          grep -Fx 'source_url="$baserom"' build.sh
+          grep -F 'notify.py download "$repo_name" "$source_url"' build.sh
+          grep -F 'notify.py unpack "$repo_name" "$source_url"' build.sh
+          grep -F 'notify.py build "$repo_name" "$source_url"' build.sh
+          python3 - <<'PY'
+          from notify import build_event_payload
+
+          env = {"DEADZONE_REQUEST_ID": "lite_deadzone1234"}
+          payload = build_event_payload(
+              "build",
+              "mohammedmezo99/DeadZone-MEZO",
+              "https://example.com/tornado-ota.zip",
+              env=env,
+          )
+          assert payload["progress"] == 55
+          try:
+              build_event_payload(
+                  "build",
+                  "mohammedmezo99/DeadZone-MEZO",
+                  "tornado-ota.zip",
+                  env=env,
+              )
+          except ValueError:
+              pass
+          else:
+              raise AssertionError("local filenames must not be accepted as source_url")
+          PY
 
       - name: Verify generic MediaTek identity rejection
         working-directory: lite
