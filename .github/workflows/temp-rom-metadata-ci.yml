@@ -1,0 +1,134 @@
+name: Temporary ROM Metadata CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-rom-metadata-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Lite engine
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: lite
+
+      - name: Verify Lite shell syntax
+        working-directory: lite
+        run: bash -n bin/ddevice/fetchINFO.sh
+
+      - name: Verify generic MediaTek identity rejection
+        working-directory: lite
+        run: |
+          set -Eeuo pipefail
+          rm -rf build/baserom/images
+          mkdir -p \
+            build/baserom/images/product/etc \
+            build/baserom/images/vendor \
+            build/baserom/images/vendor_dlkm/etc \
+            build/baserom/images/system/system \
+            bin/script2flash/META-INF
+
+          cat > build/baserom/images/product/etc/build.prop <<'EOF'
+          ro.product.mod_device=tornado_cn
+          ro.product.product.device=missi
+          ro.product.product.model=miproduct
+          ro.mi.os.version.incremental=OS3.0.302.0.WPOCNXM
+          ro.build.ab_update=true
+          ro.virtual_ab.enabled=true
+          EOF
+
+          cat > build/baserom/images/vendor/build.prop <<'EOF'
+          ro.product.vendor.device=mgvi_64_armv82
+          ro.product.vendor.model=mgvi_64_armv82
+          ro.product.vendor.brand=Redmi
+          ro.mediatek.platform=MT6991
+          EOF
+
+          cat > build/baserom/images/vendor_dlkm/etc/build.prop <<'EOF'
+          ro.product.vendor_dlkm.marketname=Redmi 15C 5G
+          ro.product.vendor_dlkm.device=tornado
+          ro.product.vendor_dlkm.brand=Redmi
+          EOF
+
+          cat > build/baserom/images/system/system/build.prop <<'EOF'
+          ro.product.system.device=generic
+          ro.product.system.model=mainline
+          ro.system.build.version.release=16
+          ro.system.build.version.sdk=36
+          EOF
+
+          printf '%s\n' tornado > bin/ddevice/device_f.txt
+          printf '%s\n' tornado > bin/ddevice/device_code.txt
+          printf '%s\n' OS3.0.302.0.WPOCNXM > bin/ddevice/base_rom_code.txt
+          printf '%s\n' China > bin/ddevice/device_type.txt
+          printf '%s\n' EROFS > bin/ddevice/fstype.txt
+          printf '%s\n' payload > bin/ddevice/romtype.txt
+
+          output="$(bash bin/ddevice/fetchINFO.sh)"
+          printf '%s\n' "$output"
+          grep -F -- '- Device: Redmi 15C 5G' <<<"$output"
+          grep -F -- '- Family: Redmi' <<<"$output"
+          grep -F -- '- Codename: tornado' <<<"$output"
+          grep -F -- '- ROM Version: OS3.0.302.0.WPOCNXM' <<<"$output"
+          grep -F -- '- Region: China' <<<"$output"
+          grep -F -- '- Android: 16' <<<"$output"
+          grep -F -- '- SDK: 36' <<<"$output"
+          grep -F -- '- Chipset: MediaTek' <<<"$output"
+          grep -F -- '- Filesystem: EROFS' <<<"$output"
+          grep -F -- '- Input Type: Payload' <<<"$output"
+          grep -F -- '- A/B Type: Virtual A/B' <<<"$output"
+          grep -F -- '- DeadZone Version: V2.02' <<<"$output"
+          ! grep -qiE 'mgvi|missi|qssi|generic|devicecode' <<<"$(cat bin/ddevice/name_devices.txt; cat bin/ddevice/device_f.txt)"
+          [[ "$(cat bin/ddevice/name_devices.txt)" == 'Redmi 15C 5G' ]]
+          [[ "$(cat bin/ddevice/device_f.txt)" == 'tornado' ]]
+
+      - name: Checkout DeadZone Bot
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-Bot
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: bot
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bot/cloudflare/package-lock.json
+
+      - name: Install bot dependencies
+        working-directory: bot/cloudflare
+        run: npm ci
+
+      - name: Secret audit
+        working-directory: bot/cloudflare
+        run: npm run security:audit
+
+      - name: Typecheck
+        working-directory: bot/cloudflare
+        run: npm run typecheck
+
+      - name: Tests
+        working-directory: bot/cloudflare
+        run: npm test
+
+      - name: D1 local migrations
+        working-directory: bot/cloudflare
+        run: npm run d1:local
+
+      - name: Worker dry run
+        working-directory: bot/cloudflare
+        run: npm run deploy:dry-run
