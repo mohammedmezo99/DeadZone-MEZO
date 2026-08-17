@@ -1,0 +1,70 @@
+name: Temporary Sync Lite Device Catalog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-sync-lite-device-catalog.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout official Lite engine
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: lite
+          fetch-depth: 1
+
+      - name: Checkout reference device catalog
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: reference
+          fetch-depth: 1
+          sparse-checkout: |
+            bin/ddevice/data/devices.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate and sync catalog
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = Path("reference/bin/ddevice/data/devices.json")
+          catalog = json.loads(source.read_text(encoding="utf-8"))
+          expected = {"creek", "garnet", "tornado"}
+          missing = sorted(expected.difference(catalog))
+          if missing:
+              raise SystemExit(f"Reference catalog missing required identities: {missing}")
+          if len(catalog) < 300:
+              raise SystemExit(f"Reference catalog unexpectedly small: {len(catalog)}")
+          print(f"Validated {len(catalog)} device identities")
+          PY
+          install -m 644 reference/bin/ddevice/data/devices.json lite/bin/ddevice/data/devices.json
+
+      - name: Commit catalog to Lite main
+        working-directory: lite
+        run: |
+          set -Eeuo pipefail
+          if git diff --quiet -- bin/ddevice/data/devices.json && git ls-files --error-unmatch bin/ddevice/data/devices.json >/dev/null 2>&1; then
+            echo "Catalog is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin/ddevice/data/devices.json
+          git commit -m "data: add Xiaomi device name catalog"
+          git push origin HEAD:main
