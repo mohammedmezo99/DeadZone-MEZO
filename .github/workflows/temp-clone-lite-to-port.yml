@@ -1,0 +1,66 @@
+name: Temporary Clone Lite To Port
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-clone-lite-to-port.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  clone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact Lite main
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: source
+          fetch-depth: 1
+
+      - name: Build clean Port working tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          mkdir target
+          rsync -a --delete --exclude='.git/' source/ target/
+
+          git -C target init
+          git -C target config user.name "github-actions[bot]"
+          git -C target config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C target add -A
+
+          source_tree=$(git -C source rev-parse HEAD^{tree})
+          target_tree=$(git -C target write-tree)
+          echo "Lite tree: $source_tree"
+          echo "Port staged tree: $target_tree"
+          test "$source_tree" = "$target_tree"
+
+          git -C target commit -m "Initial Port source from DeadZone-xiaomi_Lite"
+          git -C target branch -M main
+          git -C target remote add origin "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Port.git"
+          git -C target push -u origin main
+
+      - name: Verify Port main is exact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          source_tree=$(git -C source rev-parse HEAD^{tree})
+          git clone --depth=1 --branch main "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Port.git" verify-port
+          port_tree=$(git -C verify-port rev-parse HEAD^{tree})
+
+          echo "Lite tree: $source_tree"
+          echo "Port tree: $port_tree"
+          test "$source_tree" = "$port_tree"
+          echo "Exact full-tree verification passed"
