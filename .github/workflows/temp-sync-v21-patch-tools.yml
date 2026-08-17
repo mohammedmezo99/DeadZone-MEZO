@@ -1,0 +1,170 @@
+name: Temporary Sync v21 Patch Tools
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-sync-v21-patch-tools.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout v21 tools
+        uses: actions/checkout@v4
+        with:
+          repository: hypermezo4-create/v21
+          ref: main
+          path: source
+          fetch-depth: 1
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            APKEditor.jar
+            baksmali.jar
+            smali.jar
+
+      - name: Checkout DeadZone Lite
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: target
+          fetch-depth: 1
+
+      - name: Install exact v21 tools and fix module paths
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          for tool in APKEditor.jar baksmali.jar smali.jar; do
+            test -s "source/$tool"
+            unzip -tqq "source/$tool"
+            cp -p -- "source/$tool" "target/bin/apktool/$tool"
+            cmp -s -- "source/$tool" "target/bin/apktool/$tool"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("target")
+
+          def replace_required(relative_path: str, old: str, new: str) -> None:
+              path = root / relative_path
+              text = path.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"missing expected text in {relative_path}: {old}")
+              path.write_text(text.replace(old, new), encoding="utf-8")
+
+          fix_notification = "bin/package/Fix notification in CN ROM/apply.sh"
+          replace_required(fix_notification, 'source "$work_dir/scripts/core/functions.sh"', 'source "$work_dir/functions.sh"')
+          replace_required(fix_notification, 'module_root="$work_dir/mods/Package/Fix notification in CN ROM"', 'module_root="$work_dir/bin/package/Fix notification in CN ROM"')
+          replace_required(fix_notification, 'tools_root="$work_dir/tools/apktool"', 'tools_root="$work_dir/bin/apktool"')
+          replace_required(fix_notification, 'baksmali="$tools_root/baksmali-mezo.jar"', 'baksmali="$tools_root/baksmali.jar"')
+          replace_required(fix_notification, 'smali="$tools_root/smali-mezo.jar"', 'smali="$tools_root/smali.jar"')
+          replace_required(fix_notification, 'device_type="$(cat "$work_dir/build/.deadzone/state/device_type.txt" 2>/dev/null || true)"', 'device_type="$(cat "$work_dir/bin/ddevice/device_type.txt" 2>/dev/null || true)"')
+
+          hide4g = "bin/package/Hide4G_MiuiSystemUI/apply.sh"
+          replace_required(hide4g, 'source "$work_dir/scripts/core/functions.sh"', 'source "$work_dir/functions.sh"')
+          replace_required(hide4g, 'module_root="$work_dir/mods/Package/Hide4G_MiuiSystemUI"', 'module_root="$work_dir/bin/package/Hide4G_MiuiSystemUI"')
+          replace_required(hide4g, 'apk_editor="$work_dir/tools/apktool/APKEditor.jar"', 'apk_editor="$work_dir/bin/apktool/APKEditor.jar"')
+          replace_required(hide4g, 'rom_os="$(cat "$work_dir/build/.deadzone/state/rom_os.txt" 2>/dev/null || true)"', 'rom_os="$(cat "$work_dir/bin/ddevice/rom_os.txt" 2>/dev/null || true)"')
+          replace_required(hide4g, 'device_type="$(cat "$work_dir/build/.deadzone/state/device_type.txt" 2>/dev/null || true)"', 'device_type="$(cat "$work_dir/bin/ddevice/device_type.txt" 2>/dev/null || true)"')
+
+          kaorios = "bin/package/KaoriosToolbox/apply.sh"
+          replace_required(kaorios, 'module_root="$work_dir/mods/Package/KaoriosToolbox"', 'module_root="$work_dir/bin/package/KaoriosToolbox"')
+          replace_required(kaorios, 'source "$work_dir/scripts/core/functions.sh"', 'source "$work_dir/functions.sh"')
+          replace_required(kaorios, 'source "$work_dir/mods/Package/Disable Signature Verification/common/jar_engine.sh"', 'source "$work_dir/bin/package/Disable Signature Verification/common/jar_engine.sh"')
+          replace_required(kaorios, 'android_version="$(cat "$work_dir/build/.deadzone/state/androidver.txt")"', 'android_version="$(cat "$work_dir/bin/ddevice/androidver.txt")"')
+
+          dsv_root = root / "bin/package/Disable Signature Verification"
+          replacements = (
+              ("scripts/core/functions.sh", "functions.sh"),
+              ("mods/Package/Disable Signature Verification", "bin/package/Disable Signature Verification"),
+              ("build/.deadzone/state/androidver.txt", "bin/ddevice/androidver.txt"),
+              ("tools/apktool/baksmaliv2.jar", "bin/apktool/baksmali.jar"),
+              ("tools/apktool/smaliv2.jar", "bin/apktool/smali.jar"),
+          )
+          for path in dsv_root.rglob("*.sh"):
+              text = path.read_text(encoding="utf-8")
+              updated = text
+              for old, new in replacements:
+                  updated = updated.replace(old, new)
+              if updated != text:
+                  path.write_text(updated, encoding="utf-8")
+          PY
+
+          bash -n "target/bin/package/Fix notification in CN ROM/apply.sh"
+          bash -n "target/bin/package/Hide4G_MiuiSystemUI/apply.sh"
+          bash -n "target/bin/package/KaoriosToolbox/apply.sh"
+          find "target/bin/package/Disable Signature Verification" -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+          ! grep -nE 'scripts/core|mods/Package|tools/apktool|build/\.deadzone/state' \
+            "target/bin/package/Fix notification in CN ROM/apply.sh" \
+            "target/bin/package/Hide4G_MiuiSystemUI/apply.sh" \
+            "target/bin/package/KaoriosToolbox/apply.sh"
+          ! grep -R -nE 'scripts/core|mods/Package/Disable Signature Verification|tools/apktool|build/\.deadzone/state' \
+            --include='*.sh' "target/bin/package/Disable Signature Verification"
+
+          grep -Fq 'APKEditor.jar' "target/bin/package/Fix notification in CN ROM/apply.sh"
+          grep -Fq 'baksmali.jar' "target/bin/package/Fix notification in CN ROM/apply.sh"
+          grep -Fq 'smali.jar' "target/bin/package/Fix notification in CN ROM/apply.sh"
+          grep -Fq 'bin/apktool/APKEditor.jar' "target/bin/package/Hide4G_MiuiSystemUI/apply.sh"
+          grep -Fq 'bin/apktool/baksmali.jar' "target/bin/package/Disable Signature Verification/common/jar_engine.sh"
+          grep -Fq 'bin/apktool/smali.jar' "target/bin/package/Disable Signature Verification/common/jar_engine.sh"
+
+      - name: Commit to Lite main
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            bin/apktool/APKEditor.jar \
+            bin/apktool/baksmali.jar \
+            bin/apktool/smali.jar \
+            "bin/package/Disable Signature Verification" \
+            "bin/package/Fix notification in CN ROM/apply.sh" \
+            "bin/package/Hide4G_MiuiSystemUI/apply.sh" \
+            "bin/package/KaoriosToolbox/apply.sh"
+          git diff --cached --check
+          git status --short
+          if git diff --cached --quiet; then
+            echo "No changes required"
+          else
+            git commit -m "package: use v21 APK and JAR patch tools"
+            git push origin HEAD:main
+          fi
+
+      - name: Verify fresh main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf verify
+          git clone --depth=1 --branch main "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Lite.git" verify >/dev/null 2>&1
+
+          for tool in APKEditor.jar baksmali.jar smali.jar; do
+            cmp -s -- "source/$tool" "verify/bin/apktool/$tool"
+            unzip -tqq "verify/bin/apktool/$tool"
+          done
+
+          bash -n "verify/bin/package/Fix notification in CN ROM/apply.sh"
+          bash -n "verify/bin/package/Hide4G_MiuiSystemUI/apply.sh"
+          bash -n "verify/bin/package/KaoriosToolbox/apply.sh"
+          find "verify/bin/package/Disable Signature Verification" -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+          ! grep -nE 'scripts/core|mods/Package|tools/apktool|build/\.deadzone/state' \
+            "verify/bin/package/Fix notification in CN ROM/apply.sh" \
+            "verify/bin/package/Hide4G_MiuiSystemUI/apply.sh" \
+            "verify/bin/package/KaoriosToolbox/apply.sh"
+          ! grep -R -nE 'scripts/core|mods/Package/Disable Signature Verification|tools/apktool|build/\.deadzone/state' \
+            --include='*.sh' "verify/bin/package/Disable Signature Verification"
+
+          echo "Verified exact v21 tools and DeadZone-native module paths"
