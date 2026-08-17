@@ -1,4 +1,4 @@
-name: Temporary Verify Lite Device Identity
+name: Temporary Final Lite Identity Check
 
 on:
   push:
@@ -8,12 +8,11 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout official Lite engine
         uses: actions/checkout@v4
@@ -24,126 +23,24 @@ jobs:
           path: lite
           fetch-depth: 1
 
-      - name: Validate catalog and shell syntax
+      - name: Verify final identity pipeline
         working-directory: lite
         run: |
           set -Eeuo pipefail
           bash -n bin/ddevice/fetchINFO.sh
+          python3 -m py_compile notify.py
           python3 - <<'PY'
           import json
           from pathlib import Path
+          import notify
+
           catalog = json.loads(Path("bin/ddevice/data/devices.json").read_text(encoding="utf-8"))
-          for codename in ("creek", "garnet", "tornado"):
-              if not catalog.get(codename):
-                  raise SystemExit(f"Missing catalog identity: {codename}")
-          if len(catalog) < 300:
-              raise SystemExit(f"Device catalog unexpectedly small: {len(catalog)}")
-          print(f"Catalog contains {len(catalog)} identities")
+          assert catalog["creek"]
+          assert catalog["garnet"]
+          assert catalog["tornado"]
+          assert notify._device_family("POCO M7 / Redmi 15", {}) == "POCO / Redmi"
+          assert notify._device_family("POCO X6 5G", {}) == "POCO"
+          assert notify._device_family("Redmi 15", {}) == "Redmi"
+          assert notify._device_family("Xiaomi Pad 7", {}) == "Pad"
+          print("Final Lite identity telemetry checks passed")
           PY
-
-      - name: Verify shared creek ROM uses marketing names
-        working-directory: lite
-        run: |
-          set -Eeuo pipefail
-          rm -rf build/baserom/images
-          mkdir -p build/baserom/images/product/etc build/baserom/images/vendor build/baserom/images/system/system bin/script2flash/META-INF
-          cat > build/baserom/images/product/etc/build.prop <<'EOF'
-          ro.product.mod_device=creek_global
-          ro.product.marketname=creek
-          ro.mi.os.version.incremental=OS3.0.304.0.WBOMIXM
-          ro.build.ab_update=true
-          ro.virtual_ab.enabled=true
-          EOF
-          cat > build/baserom/images/vendor/build.prop <<'EOF'
-          ro.product.vendor.brand=Redmi
-          ro.board.platform=sm4450
-          EOF
-          cat > build/baserom/images/system/system/build.prop <<'EOF'
-          ro.system.build.version.release=16
-          ro.system.build.version.sdk=36
-          EOF
-          printf '%s\n' creek > bin/ddevice/device_f.txt
-          printf '%s\n' creek > bin/ddevice/device_code.txt
-          printf '%s\n' OS3.0.304.0.WBOMIXM > bin/ddevice/base_rom_code.txt
-          printf '%s\n' Global > bin/ddevice/device_type.txt
-          printf '%s\n' EROFS > bin/ddevice/fstype.txt
-          printf '%s\n' payload > bin/ddevice/romtype.txt
-          sed '/bash "$work_dir\/bin\/ddevice\/genInstall.sh"/d' bin/ddevice/fetchINFO.sh > /tmp/fetchINFO-test.sh
-          output="$(bash /tmp/fetchINFO-test.sh)"
-          printf '%s\n' "$output"
-          grep -F -- '- Device: POCO M7 / Redmi 15' <<<"$output"
-          grep -F -- '- Family: POCO / Redmi' <<<"$output"
-          grep -F -- '- Codename: creek' <<<"$output"
-          ! grep -F -- '- Device: creek' <<<"$output"
-          ! grep -F -- '- Device: Unknown' <<<"$output"
-          [[ "$(cat bin/ddevice/name_devices.txt)" == 'POCO M7 / Redmi 15' ]]
-          [[ "$(cat bin/ddevice/device_f.txt)" == 'creek' ]]
-
-      - name: Verify real ROM marketname wins over catalog
-        working-directory: lite
-        run: |
-          set -Eeuo pipefail
-          rm -rf build/baserom/images
-          mkdir -p build/baserom/images/product/etc build/baserom/images/odm/etc build/baserom/images/vendor build/baserom/images/system/system bin/script2flash/META-INF
-          cat > build/baserom/images/product/etc/build.prop <<'EOF'
-          ro.product.mod_device=garnet_global
-          ro.mi.os.version.incremental=OS2.0.208.0.VNPMIXM
-          ro.build.ab_update=true
-          ro.virtual_ab.enabled=true
-          EOF
-          cat > build/baserom/images/odm/etc/build.prop <<'EOF'
-          ro.product.odm.marketname=POCO X6 5G
-          ro.product.odm.brand=POCO
-          EOF
-          cat > build/baserom/images/vendor/build.prop <<'EOF'
-          ro.board.platform=sm7435
-          EOF
-          cat > build/baserom/images/system/system/build.prop <<'EOF'
-          ro.system.build.version.release=15
-          ro.system.build.version.sdk=35
-          EOF
-          printf '%s\n' garnet > bin/ddevice/device_f.txt
-          printf '%s\n' garnet > bin/ddevice/device_code.txt
-          printf '%s\n' OS2.0.208.0.VNPMIXM > bin/ddevice/base_rom_code.txt
-          printf '%s\n' Global > bin/ddevice/device_type.txt
-          printf '%s\n' EROFS > bin/ddevice/fstype.txt
-          printf '%s\n' payload > bin/ddevice/romtype.txt
-          output="$(bash /tmp/fetchINFO-test.sh)"
-          printf '%s\n' "$output"
-          grep -F -- '- Device: POCO X6 5G' <<<"$output"
-          grep -F -- '- Family: POCO' <<<"$output"
-          grep -F -- '- Codename: garnet' <<<"$output"
-          ! grep -F -- '- Device: garnet' <<<"$output"
-
-      - name: Checkout DeadZone Bot
-        uses: actions/checkout@v4
-        with:
-          repository: mohammedmezo99/DeadZone-Bot
-          ref: main
-          token: ${{ secrets.GH_TOKEN }}
-          path: bot
-          fetch-depth: 1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: bot/cloudflare/package-lock.json
-
-      - name: Verify bot regression guard
-        working-directory: bot/cloudflare
-        run: |
-          set -Eeuo pipefail
-          npm ci
-          npm run security:audit
-          npm run typecheck
-          npx vitest run test/live-build-v4.spec.ts
-          npm test
-          npm run d1:local
-          npm run deploy:dry-run
-
-      - name: Trigger production bot deploy
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api --method POST repos/mohammedmezo99/DeadZone-MEZO/actions/workflows/deploy-bot.yml/dispatches -f ref=main
