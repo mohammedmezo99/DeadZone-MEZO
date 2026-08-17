@@ -1,0 +1,20 @@
+name: Temporary Trigger Bot Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-trigger-bot-deploy.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger production bot deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST repos/mohammedmezo99/DeadZone-MEZO/actions/workflows/deploy-bot.yml/dispatches -f ref=main
