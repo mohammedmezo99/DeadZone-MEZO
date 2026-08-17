@@ -1,0 +1,75 @@
+name: Temporary Clone Lite To Port Archive
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-clone-lite-to-port-archive.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  clone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      SOURCE_COMMIT: 4749f27ae70c7f1df1baec19b311d69a1b81bc0f
+      EXPECTED_TREE: 4c5a55439b543806a89e2e7c0a9854b6c45d0f9b
+    steps:
+      - name: Download exact Lite snapshot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir source
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/mohammedmezo99/DeadZone-xiaomi_Lite/tarball/${SOURCE_COMMIT}" \
+            -o source.tar.gz
+          tar -xzf source.tar.gz --strip-components=1 -C source
+
+      - name: Create exact Port initial tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PORT_URL="https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Port.git"
+
+          remote_main=$(git ls-remote --heads "$PORT_URL" refs/heads/main | awk '{print $1}')
+          if [[ -n "$remote_main" ]]; then
+            echo "Port main already exists; first workflow may have completed."
+            git clone --depth=1 --branch main "$PORT_URL" existing-port
+            existing_tree=$(git -C existing-port rev-parse HEAD^{tree})
+            echo "Existing Port tree: $existing_tree"
+            test "$existing_tree" = "$EXPECTED_TREE"
+            exit 0
+          fi
+
+          cp -a source target
+          git -C target init
+          git -C target config user.name "github-actions[bot]"
+          git -C target config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C target add -A
+
+          staged_tree=$(git -C target write-tree)
+          echo "Expected Lite tree: $EXPECTED_TREE"
+          echo "Port staged tree: $staged_tree"
+          test "$staged_tree" = "$EXPECTED_TREE"
+
+          git -C target commit -m "Initial Port source from DeadZone-xiaomi_Lite"
+          git -C target branch -M main
+          git -C target remote add origin "$PORT_URL"
+          git -C target push -u origin main
+
+      - name: Verify public Port tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --depth=1 --branch main "https://github.com/mohammedmezo99/DeadZone-xiaomi_Port.git" verify-port
+          port_tree=$(git -C verify-port rev-parse HEAD^{tree})
+          echo "Expected Lite tree: $EXPECTED_TREE"
+          echo "Port tree: $port_tree"
+          test "$port_tree" = "$EXPECTED_TREE"
+          echo "Exact full-tree verification passed"
