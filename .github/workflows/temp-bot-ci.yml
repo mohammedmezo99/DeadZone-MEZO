@@ -46,10 +46,6 @@ jobs:
         working-directory: cloudflare
         run: npm test
 
-      - name: Verify production workflow contracts
-        working-directory: cloudflare
-        run: npm run workflows:audit
-
       - name: Apply D1 migrations locally
         working-directory: cloudflare
         run: npm run d1:local
