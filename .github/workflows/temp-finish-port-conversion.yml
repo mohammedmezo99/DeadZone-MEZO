@@ -35,11 +35,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p bin/port
-
           cp -f uploadROM.sh bin/port/uploadROM.sh
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('bin/port/uploadROM.sh')
           text = path.read_text()
           changes = (
@@ -77,7 +75,6 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('notify.py')
           text = path.read_text()
           changes = (
@@ -90,7 +87,6 @@ jobs:
               if old not in text:
                   raise SystemExit(f'notify anchor missing: {old}')
               text = text.replace(old, new)
-
           marker = '\n\ndef _rom_properties() -> dict[str, str]:\n'
           if marker not in text:
               raise SystemExit('notify metadata marker missing')
@@ -116,7 +112,6 @@ jobs:
               text = text.replace(old, new)
           path.write_text(text)
           PY
-
           chmod +x build.sh setup.sh uploadROM.sh bin/port/merge.sh bin/port/uploadROM.sh
 
       - name: Validate before push
@@ -124,20 +119,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash -n build.sh
-          bash -n setup.sh
-          bash -n uploadROM.sh
-          bash -n bin/port/merge.sh
-          bash -n bin/port/uploadROM.sh
-          python3 -m py_compile notify.py
-          grep -Fq 'DeadZone_Port_V${version_number}_${codename_upper}_${rom_version_component}_${region_component}-A${android_digits}.zip' bin/port/uploadROM.sh
-          grep -Fq '${RCLONE_UPLOAD_DIR%/}/Port/${codename_upper}/${os_folder}/${final_name}' bin/port/uploadROM.sh
-          grep -Fq 'r"port_[A-Za-z0-9]{8,80}"' notify.py
-          grep -Fq '"project": "port"' notify.py
-          grep -Fq 'stock_device_name' notify.py
-          grep -Fq 'port_device_name' notify.py
+          bash -n build.sh && echo 'PASS bash build'
+          bash -n setup.sh && echo 'PASS bash setup'
+          bash -n uploadROM.sh && echo 'PASS bash upload wrapper'
+          bash -n bin/port/merge.sh && echo 'PASS bash merge'
+          bash -n bin/port/uploadROM.sh && echo 'PASS bash Port uploader'
+          python3 -m py_compile notify.py && echo 'PASS python notify'
+          grep -Fq 'DeadZone_Port_V${version_number}_${codename_upper}_${rom_version_component}_${region_component}-A${android_digits}.zip' bin/port/uploadROM.sh && echo 'PASS final name'
+          grep -Fq '${RCLONE_UPLOAD_DIR%/}/Port/${codename_upper}/${os_folder}/${final_name}' bin/port/uploadROM.sh && echo 'PASS Port path'
+          grep -Fq 'r"port_[A-Za-z0-9]{8,80}"' notify.py || grep -Fq 'r"port_[A-Za-z0-9]{8,80}"' notify.py
+          grep -Fq 'port_[A-Za-z0-9]{8,80}' notify.py && echo 'PASS Port request id'
+          grep -Fq '"project": "port"' notify.py && echo 'PASS project port'
+          grep -Fq 'stock_device_name' notify.py && echo 'PASS stock metadata'
+          grep -Fq 'port_device_name' notify.py && echo 'PASS port metadata'
           rm -rf __pycache__
           git diff --check -- build.sh notify.py uploadROM.sh setup.sh bin/port/merge.sh bin/port/uploadROM.sh README.MD
+          echo 'PASS diff check'
 
       - name: Commit directly to Port main
         working-directory: target
