@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: mohammedmezo99/DeadZone-Bot
-          ref: 7361bb6013ef4fb888462b5e38b8b530052d644a
+          ref: a6a9efffb9149b4c0a60ce35f7d88471b025a701
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Setup Node.js
