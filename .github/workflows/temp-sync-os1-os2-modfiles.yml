@@ -1,0 +1,105 @@
+name: Temporary Sync OS1 OS2 Modfiles
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-sync-os1-os2-modfiles.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source trees
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: source
+          fetch-depth: 1
+          sparse-checkout: |
+            mods/OS1_A14
+            mods/OS2_A14
+            mods/OS2_A15
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout private Lite target
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Lite
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: target
+          fetch-depth: 1
+
+      - name: Copy exact trees
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in OS1_A14 OS2_A14 OS2_A15; do
+            test ! -e "target/bin/modfile/$name"
+            cp -a -- "source/mods/$name" "target/bin/modfile/$name"
+          done
+
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          from pathlib import Path
+
+          names = ('OS1_A14', 'OS2_A14', 'OS2_A15')
+
+          def inventory(root):
+              entries = {}
+              for path in sorted(root.rglob('*')):
+                  rel = path.relative_to(root).as_posix()
+                  st = path.lstat()
+                  if path.is_symlink():
+                      entries[rel] = ('symlink', os.readlink(path), stat.S_IMODE(st.st_mode))
+                  elif path.is_file():
+                      entries[rel] = ('file', hashlib.sha256(path.read_bytes()).hexdigest(), stat.S_IMODE(st.st_mode))
+                  elif path.is_dir():
+                      entries[rel] = ('dir', None, None)
+              return entries
+
+          for name in names:
+              src = Path('source/mods') / name
+              dst = Path('target/bin/modfile') / name
+              left = inventory(src)
+              right = inventory(dst)
+              if left != right:
+                  raise SystemExit(f'tree mismatch before commit: {name}')
+              files = sum(1 for item in left.values() if item[0] == 'file')
+              links = sum(1 for item in left.values() if item[0] == 'symlink')
+              print(f'{name}: {files} files, {links} symlinks — exact before commit')
+          PY
+
+      - name: Commit directly to Lite main
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- bin/modfile/OS1_A14 bin/modfile/OS2_A14 bin/modfile/OS2_A15
+          git status --short
+          git commit -m "modfile: add OS1_A14 OS2_A14 and OS2_A15"
+          git push origin HEAD:main
+
+      - name: Verify exact Git trees after push
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C target fetch origin main
+          for name in OS1_A14 OS2_A14 OS2_A15; do
+            source_tree=$(git -C source rev-parse "HEAD:mods/$name")
+            target_tree=$(git -C target rev-parse "origin/main:bin/modfile/$name")
+            test "$source_tree" = "$target_tree"
+            echo "$name tree: $target_tree"
+          done
+          echo "Exact Git-tree verification passed"
