@@ -32,6 +32,9 @@ jobs:
           path: source
           fetch-depth: 1
           persist-credentials: false
+          sparse-checkout: |
+            mods/Package/Disable Signature Verification
+          sparse-checkout-cone-mode: false
 
       - name: Validate dispatcher wiring
         working-directory: lite
