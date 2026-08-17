@@ -89,7 +89,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- bin/modfile/MIUI14 bin/modfile/OS3_A15 .github/workflows/temp-sync-miui14-os3a15.yml
-          git diff --cached --check
           git status --short
           git commit -m "modfile: add MIUI14 and OS3_A15"
           git push origin HEAD:main
