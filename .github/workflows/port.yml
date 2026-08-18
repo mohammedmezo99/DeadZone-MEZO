@@ -183,7 +183,7 @@ jobs:
 
       - name: 🔧 Give Port tools permission
         working-directory: toolbuild
-        run: chmod -R u+rwX,go+rX .
+        run: sudo chmod 777 -R *
 
       - name: 🔂 Build Stock + Port ROM
         working-directory: toolbuild
