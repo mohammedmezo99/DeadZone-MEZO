@@ -389,7 +389,6 @@ jobs:
         if: always()
         run: |
           sudo rm -rf toolbuild/out toolbuild/build
-          rm -rf runtime
           rm -f toolbuild/rclone.conf
 
       - name: ❌ Report failed Port build
