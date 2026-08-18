@@ -1,0 +1,491 @@
+name: Temporary Port Preparation Flow
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/temp-port-prepare-flow.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_HEAD: bb0cf1614490bbc9f2b19ff6ad775f69a427f0d3
+    steps:
+      - name: Checkout Port target
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-xiaomi_Port
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: target
+          fetch-depth: 1
+
+      - name: Guard target head
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+
+      - name: Add isolated preparation flow
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bin/port
+
+          cat > bin/port/prepare.sh <<'PREPARE_SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          work_dir="${work_dir:-$(pwd)}"
+          state_root="$work_dir/build/.port_state"
+          download_root="$work_dir/build/downloads"
+          source "$work_dir/functions.sh"
+
+          runtime_files=(
+              androidver.txt base_rom_code.txt device_code.txt device_f.txt device_type.txt
+              fstype.txt name_devices.txt os_code.txt os_type.txt rom_os.txt romtype.txt sdkLevel.txt
+          )
+
+          role_state_dir() {
+              printf '%s\n' "$state_root/$1"
+          }
+
+          role_archive() {
+              local role="$1" archive_file="$state_root/$role/archive_path.txt"
+              [[ -s "$archive_file" ]] || { error "Missing ${role^^} archive state"; return 1; }
+              cat "$archive_file"
+          }
+
+          clear_runtime_state() {
+              local name
+              for name in "${runtime_files[@]}"; do
+                  rm -f "$work_dir/bin/ddevice/$name"
+              done
+          }
+
+          snapshot_runtime_state() {
+              local role="$1" name state_dir="$state_root/$role/ddevice"
+              rm -rf "$state_dir"
+              mkdir -p "$state_dir"
+              for name in "${runtime_files[@]}"; do
+                  [[ -f "$work_dir/bin/ddevice/$name" ]] && cp -f "$work_dir/bin/ddevice/$name" "$state_dir/$name"
+              done
+          }
+
+          download_role() {
+              local role="$1" input_rom="$2" role_dir="$download_root/$role" archive
+              local -a archives=()
+              rm -rf "$role_dir"
+              mkdir -p "$role_dir" "$state_root/$role"
+              if [[ "$input_rom" =~ ^https?:// ]]; then
+                  info "Downloading ${role^^} ROM"
+                  aria2c --max-download-limit=1024M --file-allocation=none -s10 -x10 -j1 \
+                      --content-disposition=true --dir="$role_dir" "$input_rom"
+                  mapfile -t archives < <(find "$role_dir" -maxdepth 1 -type f ! -name '*.aria2' -print | sort)
+                  (( ${#archives[@]} == 1 )) || { error "${role^^} download did not produce exactly one archive"; return 1; }
+                  archive="${archives[0]}"
+              elif [[ -f "$input_rom" ]]; then
+                  archive="$(readlink -f "$input_rom")"
+              else
+                  error "Invalid ${role^^} ROM source"
+                  return 1
+              fi
+              printf '%s\n' "$archive" > "$state_root/$role/archive_path.txt"
+              touch "$state_root/$role/downloaded.ok"
+          }
+
+          print_stage_summary() {
+              local stage="$1" icon marker
+              case "$stage" in
+                  download) icon="📥"; marker="downloaded.ok" ;;
+                  extract) icon="📦"; marker="extracted.ok" ;;
+                  *) error "Unknown preparation stage: $stage"; return 1 ;;
+              esac
+              [[ -f "$state_root/stock/$marker" && -f "$state_root/port/$marker" ]] || return 1
+              printf '\n%s %s\n' "$icon" "${stage^^}"
+              printf '├── STOCK ROM  ───────────── ✅\n'
+              printf '└── PORT ROM   ───────────── ✅\n\n'
+          }
+
+          archive_layout() {
+              local archive="$1" listing="$2"
+              unzip -Z1 "$archive" > "$listing"
+              if grep -qE '(^|/)payload\.bin$' "$listing"; then
+                  printf '%s\n' payload
+              elif grep -q '\.new\.dat\.br$' "$listing"; then
+                  printf '%s\n' br
+              elif grep -qE '(^|/)images/super\.img(\.[0-9]+)?$' "$listing"; then
+                  printf '%s\n' fastboot-super
+              else
+                  return 1
+              fi
+          }
+
+          extract_payload_archive() {
+              local role_root="$1" archive="$2" listing="$3" payload_entry
+              payload_entry="$(awk '$0 ~ /(^|\/)payload\.bin$/ {print; exit}' "$listing")"
+              unzip -p "$archive" "$payload_entry" > "$role_root/payload.bin"
+              payload-extract extract -o "$role_root/images" "$role_root/payload.bin" >/dev/null 2>&1
+              role_partitions="vendor mi_ext mi_product odm odm_dlkm system system_dlkm vendor_dlkm product product_dlkm system_ext"
+          }
+
+          extract_brotli_archive() {
+              local role_root="$1" archive="$2" source_root="$role_root/source" op_list br_root part
+              unzip -q "$archive" -d "$source_root"
+              op_list="$(find "$source_root" -type f -name dynamic_partitions_op_list -print -quit)"
+              [[ -n "$op_list" ]] || { error "dynamic_partitions_op_list is missing"; return 1; }
+              br_root="$(dirname "$op_list")"
+              role_partitions="$(awk '$1 == "add" {print $2}' "$op_list" | tr '\n' ' ')"
+              for part in $role_partitions; do
+                  brotli -d "$br_root/$part.new.dat.br" >/dev/null 2>&1
+                  python3 "$work_dir/bin/Linux/x86_64/sdat2img.py" \
+                      "$br_root/$part.transfer.list" "$br_root/$part.new.dat" \
+                      "$role_root/images/$part.img" >/dev/null 2>&1
+              done
+              [[ -d "$br_root/firmware-update" ]] && mv "$br_root/firmware-update" "$role_root/" || true
+          }
+
+          normalize_super_image() {
+              local source_image="$1" target_image="$2"
+              if simg2img "$source_image" "$target_image" >/dev/null 2>&1; then
+                  return 0
+              fi
+              cp -f "$source_image" "$target_image"
+          }
+
+          unpack_super_image() {
+              local super_image="$1" target_images="$2" raw_names raw base
+              raw_names="$(python3 "$work_dir/bin/lpunpack.py" --info "$super_image" | awk '/super:/ {print $5}')"
+              [[ -n "$raw_names" ]] || { error "No dynamic partitions found in super.img"; return 1; }
+              role_partitions=""
+              for raw in $raw_names; do
+                  [[ "$raw" == *_b ]] && continue
+                  base="${raw%_a}"
+                  base="${base%_b}"
+                  python3 "$work_dir/bin/lpunpack.py" -p "$raw" "$super_image" "$target_images" >/dev/null 2>&1
+                  [[ "$raw" == "$base" ]] || mv -f "$target_images/$raw.img" "$target_images/$base.img"
+                  role_partitions+="$base "
+              done
+          }
+
+          extract_fastboot_archive() {
+              local role_root="$1" archive="$2" source_root="$role_root/source" source_images source_super
+              local -a super_chunks=()
+              unzip -q "$archive" -d "$source_root"
+              source_images="$(find "$source_root" -type d -name images -print -quit)"
+              [[ -n "$source_images" ]] || { error "Fastboot images directory is missing"; return 1; }
+              cp -a "$source_images/." "$role_root/images/"
+              mapfile -t super_chunks < <(find "$role_root/images" -maxdepth 1 -type f -name 'super.img.*' | sort -V)
+              if (( ${#super_chunks[@]} > 0 )); then
+                  simg2img "${super_chunks[@]}" "$role_root/super.img"
+              elif [[ -s "$role_root/images/super.img" ]]; then
+                  source_super="$role_root/images/super.img"
+                  normalize_super_image "$source_super" "$role_root/super.img"
+              else
+                  error "super.img is missing"
+                  return 1
+              fi
+              rm -f "$role_root/images"/super.img*
+              unpack_super_image "$role_root/super.img" "$role_root/images"
+          }
+
+          extract_dynamic_partitions() {
+              local images_dir="$1" part
+              [[ -n "$role_partitions" ]] || { error "No dynamic partitions detected"; return 1; }
+              for part in $role_partitions; do
+                  [[ -f "$images_dir/$part.img" ]] || continue
+                  extract_partition "$images_dir/$part.img" "$images_dir"
+              done
+          }
+
+          extract_role() {
+              local role="$1" archive role_root="$work_dir/build/${role}rom" listing layout
+              archive="$(role_archive "$role")"
+              listing="$state_root/$role/archive_entries.txt"
+              rm -rf "$role_root"
+              mkdir -p "$role_root/images"
+              clear_runtime_state
+              layout="$(archive_layout "$archive" "$listing")" || { error "Unsupported ${role^^} ROM package"; return 1; }
+              printf '%s\n' "$layout" > "$work_dir/bin/ddevice/romtype.txt"
+              role_partitions=""
+              case "$layout" in
+                  payload) extract_payload_archive "$role_root" "$archive" "$listing" ;;
+                  br) extract_brotli_archive "$role_root" "$archive" ;;
+                  fastboot-super) extract_fastboot_archive "$role_root" "$archive" ;;
+              esac
+              extract_dynamic_partitions "$role_root/images"
+              rm -rf "$role_root/source" "$role_root/payload.bin" "$role_root/super.img"
+              touch "$state_root/$role/extracted.ok"
+              [[ "$archive" == "$download_root/$role/"* ]] && rm -rf "$download_root/$role" || true
+          }
+
+          seed_metadata_defaults() {
+              printf '%s\n' Unknown > "$work_dir/bin/ddevice/base_rom_code.txt"
+              printf '%s\n' Unknown > "$work_dir/bin/ddevice/os_code.txt"
+              printf '%s\n' unknown > "$work_dir/bin/ddevice/device_code.txt"
+              printf '%s\n' unknown > "$work_dir/bin/ddevice/device_f.txt"
+              printf '%s\n' China > "$work_dir/bin/ddevice/device_type.txt"
+          }
+
+          validate_role_metadata() {
+              local role="$1" file content
+              for file in device_f.txt base_rom_code.txt androidver.txt fstype.txt romtype.txt; do
+                  content="$(tr -d '\r\n' < "$work_dir/bin/ddevice/$file" 2>/dev/null || true)"
+                  [[ -n "$content" ]] || { error "${role^^} metadata is missing: $file"; return 1; }
+              done
+              [[ "$(cat "$work_dir/bin/ddevice/device_f.txt")" != unknown ]] || { error "${role^^} codename was not detected"; return 1; }
+              [[ "$(cat "$work_dir/bin/ddevice/base_rom_code.txt")" != Unknown ]] || { error "${role^^} ROM version was not detected"; return 1; }
+          }
+
+          inspect_role() {
+              local role="$1" images_dir="$work_dir/build/${role}rom/images" generated_code
+              [[ -d "$images_dir" ]] || { error "${role^^} images are missing"; return 1; }
+              seed_metadata_defaults
+              bash "$work_dir/bin/ddevice/fetchINFO.sh" "$images_dir" >/dev/null
+              validate_role_metadata "$role"
+              snapshot_runtime_state "$role"
+              generated_code="$(cat "$work_dir/bin/ddevice/device_code.txt")"
+              rm -f "$work_dir/bin/script2flash/${generated_code}.install"
+              touch "$state_root/$role/inspected.ok"
+          }
+
+          state_value() {
+              local role="$1" file="$2" fallback="${3:-Unknown}" path="$state_root/$role/ddevice/$file"
+              [[ -s "$path" ]] && tr -d '\r\n' < "$path" || printf '%s\n' "$fallback"
+          }
+
+          format_filesystem() {
+              case "${1^^}" in
+                  EXT|EXT4) printf '%s\n' EXT4 ;;
+                  EROFS) printf '%s\n' EROFS ;;
+                  *) printf '%s\n' "${1:-Unknown}" ;;
+              esac
+          }
+
+          format_input_type() {
+              case "${1,,}" in
+                  payload) printf '%s\n' Payload ;;
+                  br) printf '%s\n' Brotli ;;
+                  fastboot-super) printf '%s\n' Fastboot-Super ;;
+                  *) printf '%s\n' "${1:-Unknown}" ;;
+              esac
+          }
+
+          print_role_summary() {
+              local role="$1" title="$2" filesystem input_type
+              filesystem="$(format_filesystem "$(state_value "$role" fstype.txt)")"
+              input_type="$(format_input_type "$(state_value "$role" romtype.txt)")"
+              printf '\n📱 %s\n' "$title"
+              printf 'Device: %s\n' "$(state_value "$role" name_devices.txt)"
+              printf 'Codename: %s\n' "$(state_value "$role" device_f.txt)"
+              printf 'Android: %s\n' "$(state_value "$role" androidver.txt)"
+              printf 'ROM: %s\n' "$(state_value "$role" base_rom_code.txt)"
+              printf 'Region: %s\n' "$(state_value "$role" device_type.txt)"
+              printf 'Filesystem: %s\n' "$filesystem"
+              printf 'Type: %s\n' "$input_type"
+          }
+
+          compatibility_check() {
+              local stock_android port_android stock_fs port_fs failed=0
+              stock_android="$(state_value stock androidver.txt)"
+              port_android="$(state_value port androidver.txt)"
+              stock_fs="$(state_value stock fstype.txt)"
+              port_fs="$(state_value port fstype.txt)"
+              printf '\n🔍 Compatibility Check\n'
+              if [[ "$stock_android" == "$port_android" ]]; then
+                  printf '├── Android: %s / %s ✅\n' "$stock_android" "$port_android"
+              else
+                  printf '├── Android: %s / %s ❌\n' "$stock_android" "$port_android"
+                  failed=1
+              fi
+              if [[ "$stock_fs" == "$port_fs" ]]; then
+                  printf '└── Filesystem: %s / %s ✅\n' "$(format_filesystem "$stock_fs")" "$(format_filesystem "$port_fs")"
+              else
+                  printf '└── Filesystem: %s / %s ❌\n' "$(format_filesystem "$stock_fs")" "$(format_filesystem "$port_fs")"
+                  failed=1
+              fi
+              (( failed == 0 )) || { error "Stock/Port compatibility check failed"; return 1; }
+          }
+
+          copy_state_required() {
+              local role="$1" name="$2" source_file="$state_root/$role/ddevice/$name"
+              [[ -s "$source_file" ]] || { error "Missing ${role^^} metadata: $name"; return 1; }
+              cp -f "$source_file" "$work_dir/bin/ddevice/$name"
+          }
+
+          finalize_runtime_state() {
+              local name port_fs
+              clear_runtime_state
+              for name in device_f.txt device_code.txt device_type.txt name_devices.txt romtype.txt; do
+                  copy_state_required stock "$name"
+              done
+              for name in base_rom_code.txt os_code.txt rom_os.txt os_type.txt androidver.txt sdkLevel.txt; do
+                  copy_state_required port "$name"
+              done
+              port_fs="$(state_value port fstype.txt)"
+              printf '%s\n' "$port_fs" > "$work_dir/bin/ddevice/fstype.txt"
+              cp -f "$work_dir/bin/ddevice/device_f.txt" "$work_dir/bin/script2flash/META-INF/CNAME"
+              bash "$work_dir/bin/ddevice/genInstall.sh" >/dev/null
+          }
+          PREPARE_SH
+
+          cat > build.sh <<'BUILD_SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          stock_rom="${1:?Usage: build.sh <stock-rom> <port-rom> [repo] [prefix] [builder-name] [builder-id]}"
+          port_rom="${2:?Usage: build.sh <stock-rom> <port-rom> [repo] [prefix] [builder-name] [builder-id]}"
+          repo_name="${3:-${GITHUB_REPOSITORY:-local}}"
+          prefix_id="${4:-port}"
+          export builder_name="${5:-}"
+          builder_id="${6:-}"
+          work_dir="$(pwd)"
+          source_url="$stock_rom"
+
+          tools_dir="$work_dir/bin/$(uname)/$(uname -m)"
+          export PATH="$tools_dir:$PATH"
+          chmod -R u+rwX,go+rX "$work_dir/bin" 2>/dev/null || true
+          source "$work_dir/bin/port/prepare.sh"
+
+          check unzip aria2c 7z zip java zipalign python3 zstd bc xmlstarlet aapt
+
+          rm -rf "$work_dir/out" "$work_dir/build"
+          mkdir -p "$work_dir/build/.port_state" "$work_dir/build/downloads"
+
+          python3 "$work_dir/notify.py" download "$repo_name" "$source_url" "$prefix_id" "$builder_name" "$builder_id"
+          download_role stock "$stock_rom"
+          download_role port "$port_rom"
+          print_stage_summary download
+
+          python3 "$work_dir/notify.py" unpack "$repo_name" "$source_url" "$prefix_id" "$builder_name" "$builder_id"
+          extract_role stock
+          extract_role port
+          print_stage_summary extract
+
+          inspect_role stock
+          inspect_role port
+          print_role_summary stock "STOCK ROM"
+          print_role_summary port "PORT ROM"
+          compatibility_check
+          finalize_runtime_state
+
+          printf '\n🔧 START PORTING\n\n'
+          bash "$work_dir/bin/port/merge.sh"
+
+          python3 "$work_dir/notify.py" build "$repo_name" "$source_url" "$prefix_id" "$builder_name" "$builder_id"
+          bash "$work_dir/bin/ddevice/DEBLOAT/debloat.sh"
+          bash "$work_dir/bin/modfile/Universal/insfile.sh"
+          bash "$work_dir/bin/modfile/UpdateFile/insupdate.sh"
+          bash "$work_dir/bin/package/patchpackage.sh"
+
+          find "$work_dir/build/baserom/images" -exec touch -t 200901010000.00 {} + 2>/dev/null || true
+          info "DeadZone Port modifications completed"
+          BUILD_SH
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("bin/ddevice/fetchINFO.sh")
+          text = path.read_text()
+          old = 'props_root="$work_dir/build/baserom/images"'
+          new = 'props_root="${1:-$work_dir/build/baserom/images}"'
+          if text.count(old) != 1:
+              raise SystemExit("fetchINFO props_root anchor changed")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          chmod +x build.sh bin/port/prepare.sh
+
+      - name: Validate preparation flow
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n build.sh
+          bash -n bin/port/prepare.sh
+          bash -n bin/ddevice/fetchINFO.sh
+          bash -n bin/port/merge.sh
+          git diff --check
+
+          grep -Fq 'props_root="${1:-$work_dir/build/baserom/images}"' bin/ddevice/fetchINFO.sh
+          grep -Fq 'role_root="$work_dir/build/${role}rom"' bin/port/prepare.sh
+          ! grep -Fq 'build/baserom' bin/port/prepare.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("build.sh").read_text()
+          anchors = [
+              'download_role stock "$stock_rom"',
+              'download_role port "$port_rom"',
+              'print_stage_summary download',
+              'extract_role stock',
+              'extract_role port',
+              'print_stage_summary extract',
+              'inspect_role stock',
+              'inspect_role port',
+              'print_role_summary stock "STOCK ROM"',
+              'print_role_summary port "PORT ROM"',
+              'compatibility_check',
+              '🔧 START PORTING',
+              'bin/port/merge.sh',
+          ]
+          positions = [text.index(anchor) for anchor in anchors]
+          if positions != sorted(positions):
+              raise SystemExit("Port preparation stages are out of order")
+          PY
+
+          rm -rf build
+          mkdir -p build/.port_state/{stock,port}/ddevice
+          for role in stock port; do
+            printf '1\n' > "build/.port_state/$role/downloaded.ok"
+            printf '1\n' > "build/.port_state/$role/extracted.ok"
+            printf 'Android Device\n' > "build/.port_state/$role/ddevice/name_devices.txt"
+            printf 'garnet\n' > "build/.port_state/$role/ddevice/device_f.txt"
+            printf '15\n' > "build/.port_state/$role/ddevice/androidver.txt"
+            printf 'OS2.0.TEST\n' > "build/.port_state/$role/ddevice/base_rom_code.txt"
+            printf 'Global\n' > "build/.port_state/$role/ddevice/device_type.txt"
+            printf 'EROFS\n' > "build/.port_state/$role/ddevice/fstype.txt"
+            printf 'payload\n' > "build/.port_state/$role/ddevice/romtype.txt"
+          done
+          bash -c 'set -Eeuo pipefail; work_dir="$PWD"; source bin/port/prepare.sh; print_stage_summary download; print_stage_summary extract; print_role_summary stock "STOCK ROM"; print_role_summary port "PORT ROM"; compatibility_check' > /tmp/prepare-output.txt
+          grep -Fq '📥 DOWNLOAD' /tmp/prepare-output.txt
+          grep -Fq '📦 EXTRACT' /tmp/prepare-output.txt
+          grep -Fq '📱 STOCK ROM' /tmp/prepare-output.txt
+          grep -Fq '📱 PORT ROM' /tmp/prepare-output.txt
+          grep -Fq '🔍 Compatibility Check' /tmp/prepare-output.txt
+          rm -rf build
+
+      - name: Commit to Port main
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "Mohammed MEZO"
+          git config user.email "cavo.store2026@gmail.com"
+          git add build.sh bin/port/prepare.sh bin/ddevice/fetchINFO.sh
+          git commit -m "port: isolate Stock and Port preparation"
+          git push origin HEAD:main
+          echo "PORT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Verify pushed flow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Port.git" verify
+          cd verify
+          test "$(git rev-parse HEAD)" = "$PORT_COMMIT"
+          bash -n build.sh
+          bash -n bin/port/prepare.sh
+          grep -Fq 'role_root="$work_dir/build/${role}rom"' bin/port/prepare.sh
+          grep -Fq '📥 DOWNLOAD' bin/port/prepare.sh
+          grep -Fq '📦 EXTRACT' bin/port/prepare.sh
+          grep -Fq '🔧 START PORTING' build.sh
+          grep -Fq 'props_root="${1:-$work_dir/build/baserom/images}"' bin/ddevice/fetchINFO.sh
