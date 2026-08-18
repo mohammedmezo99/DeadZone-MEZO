@@ -1,0 +1,730 @@
+name: Temporary Guide Port Core
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/temp-guide-port-core.yml
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_HEAD: 0317b3446c0c578709765abcf321554419dca970
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    steps:
+      - name: Checkout target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/mohammedmezo99/DeadZone-xiaomi_Port.git" target
+          cd target
+          git checkout main
+          current="$(git rev-parse HEAD)"
+          if [[ "$current" != "$EXPECTED_HEAD" ]]; then
+            echo "Target main moved: expected $EXPECTED_HEAD got $current" >&2
+            exit 1
+          fi
+
+      - name: Apply guide port core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              if old not in text:
+                  raise SystemExit(f"Patch anchor not found in {path}: {old[:80]!r}")
+              if text.count(old) != 1:
+                  raise SystemExit(f"Patch anchor is not unique in {path}")
+              file.write_text(text.replace(old, new, 1))
+
+          replace_exact(
+              "bin/port/prepare.sh",
+              '''extract_dynamic_partitions() {
+              local images_dir="$1" part
+              [[ -n "$role_partitions" ]] || { error "No dynamic partitions detected"; return 1; }
+              for part in $role_partitions; do
+                  [[ -f "$images_dir/$part.img" ]] || continue
+                  extract_partition "$images_dir/$part.img" "$images_dir"
+              done
+          }
+          ''',
+              '''partition_filesystem() {
+              local image="$1" detected
+              detected="$("$work_dir/bin/Linux/x86_64/gettype" -i "$image")"
+              case "$detected" in
+                  ext) printf '%s\\n' EXT ;;
+                  erofs) printf '%s\\n' EROFS ;;
+                  *) error "Unsupported filesystem for $(basename "$image"): $detected"; return 1 ;;
+              esac
+          }
+
+          record_partition_filesystem() {
+              local role="$1" part="$2" filesystem="$3"
+              printf '%s=%s\\n' "$part" "$filesystem" >> "$state_root/$role/partition_fs_map.txt"
+          }
+
+          should_preserve_original() {
+              local role="$1" part="$2"
+              case "$role:$part" in
+                  stock:vendor|stock:odm|stock:vendor_dlkm|stock:odm_dlkm|stock:system_dlkm|stock:product_dlkm|stock:mi_product) return 0 ;;
+                  port:system|port:mi_ext|port:mi_product) return 0 ;;
+                  *) return 1 ;;
+              esac
+          }
+
+          preserve_original_partition() {
+              local role="$1" part="$2" image="$3"
+              local originals="$work_dir/build/${role}rom/original_images"
+              mkdir -p "$originals"
+              rm -f "$originals/$part.img"
+              ln "$image" "$originals/$part.img" 2>/dev/null || cp -f "$image" "$originals/$part.img"
+          }
+
+          extract_dynamic_partitions() {
+              local role="$1" images_dir="$2" part filesystem
+              [[ -n "$role_partitions" ]] || { error "No dynamic partitions detected"; return 1; }
+              : > "$state_root/$role/partition_fs_map.txt"
+              for part in $role_partitions; do
+                  [[ -f "$images_dir/$part.img" ]] || continue
+                  filesystem="$(partition_filesystem "$images_dir/$part.img")"
+                  record_partition_filesystem "$role" "$part" "$filesystem"
+                  should_preserve_original "$role" "$part" && preserve_original_partition "$role" "$part" "$images_dir/$part.img"
+                  extract_partition "$images_dir/$part.img" "$images_dir"
+              done
+          }
+          '''
+          )
+
+          replace_exact(
+              "bin/port/prepare.sh",
+              '    extract_dynamic_partitions "$role_root/images"\n',
+              '    extract_dynamic_partitions "$role" "$role_root/images"\n'
+          )
+
+          replace_exact(
+              "build.sh",
+              '''bash "$work_dir/bin/package/patchpackage.sh"
+
+          find "$work_dir/build/baserom/images" -exec touch -t 200901010000.00 {} + 2>/dev/null || true
+          ''',
+              '''bash "$work_dir/bin/package/patchpackage.sh"
+
+          python3 "$work_dir/bin/port/partition_state.py" changes \\
+              "$work_dir/build/baserom/images" \\
+              "$work_dir/build/baserom/original_images" \\
+              "$work_dir/build/.port_state/original_tree_stamps" \\
+              > "$work_dir/build/.port_state/changed_original_partitions.txt"
+
+          find "$work_dir/build/baserom/images" -exec touch -t 200901010000.00 {} + 2>/dev/null || true
+          '''
+          )
+          PY
+
+          cat > bin/port/partition_state.py <<'PY'
+          #!/usr/bin/env python3
+          import hashlib
+          import os
+          import sys
+          from pathlib import Path
+
+
+          def tree_stamp(root: Path) -> str:
+              digest = hashlib.sha256()
+              for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+                  dirs.sort()
+                  files.sort()
+                  for name in [*dirs, *files]:
+                      path = Path(current, name)
+                      stat = path.lstat()
+                      relative = path.relative_to(root).as_posix()
+                      fields = (
+                          relative,
+                          str(stat.st_mode),
+                          str(stat.st_size),
+                          str(stat.st_mtime_ns),
+                          str(stat.st_ctime_ns),
+                          str(stat.st_uid),
+                          str(stat.st_gid),
+                      )
+                      digest.update("\0".join(fields).encode())
+                      if path.is_symlink():
+                          digest.update(os.readlink(path).encode())
+              return digest.hexdigest()
+
+
+          def changed_partitions(images: Path, originals: Path, stamps: Path) -> list[str]:
+              changed = []
+              if not originals.is_dir():
+                  return changed
+              for image in sorted(originals.glob("*.img")):
+                  partition = image.stem
+                  directory = images / partition
+                  baseline = stamps / f"{partition}.sha256"
+                  if not directory.is_dir() or not baseline.is_file():
+                      changed.append(partition)
+                      continue
+                  if tree_stamp(directory) != baseline.read_text().strip():
+                      changed.append(partition)
+              return changed
+
+
+          def main() -> int:
+              if len(sys.argv) < 3:
+                  return 2
+              command = sys.argv[1]
+              if command == "stamp" and len(sys.argv) == 3:
+                  print(tree_stamp(Path(sys.argv[2])))
+                  return 0
+              if command == "changes" and len(sys.argv) == 5:
+                  for partition in changed_partitions(*(Path(value) for value in sys.argv[2:5])):
+                      print(partition)
+                  return 0
+              return 2
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+          chmod +x bin/port/partition_state.py
+
+          cat > bin/port/merge.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          work_dir="$(pwd)"
+          stock_root="$work_dir/build/stockrom"
+          port_root="$work_dir/build/portrom"
+          final_root="$work_dir/build/baserom"
+          stock_images="$stock_root/images"
+          port_images="$port_root/images"
+          final_images="$final_root/images"
+          final_originals="$final_root/original_images"
+          state_root="$work_dir/build/.port_state"
+          final_fs_map="$state_root/final_partition_fs_map.txt"
+          stamp_root="$state_root/original_tree_stamps"
+          stamp_tool="$work_dir/bin/port/partition_state.py"
+          source "$work_dir/functions.sh"
+
+          require_dir() {
+              local path="$1" label="$2"
+              [[ -d "$path" ]] || { error "$label is missing: $path"; return 1; }
+          }
+
+          filesystem_for() {
+              local role="$1" part="$2"
+              awk -F= -v name="$part" '$1 == name {print $2; exit}' "$state_root/$role/partition_fs_map.txt"
+          }
+
+          record_final_filesystem() {
+              local role="$1" part="$2" filesystem
+              filesystem="$(filesystem_for "$role" "$part")"
+              [[ -n "$filesystem" ]] || { error "Missing $role filesystem metadata for $part"; return 1; }
+              printf '%s=%s\n' "$part" "$filesystem" >> "$final_fs_map"
+          }
+
+          copy_partition_metadata() {
+              local source_images="$1" part="$2" required
+              local source_config="$source_images/config"
+              local target_config="$final_images/config"
+              mkdir -p "$target_config"
+              for required in "${part}_fs_config" "${part}_file_contexts"; do
+                  [[ -s "$source_config/$required" ]] || { error "Missing packing metadata for $part: $required"; return 1; }
+              done
+              find "$source_config" -maxdepth 1 -type f -name "${part}_*" -exec cp -f {} "$target_config/" \;
+          }
+
+          move_original_if_present() {
+              local role="$1" part="$2"
+              local source="$work_dir/build/${role}rom/original_images/$part.img"
+              [[ -s "$source" ]] || return 0
+              mkdir -p "$final_originals"
+              mv -f "$source" "$final_originals/$part.img"
+          }
+
+          move_partition() {
+              local source_images="$1" role="$2" part="$3" required="${4:-false}"
+              if [[ ! -d "$source_images/$part" ]]; then
+                  [[ "$required" == true ]] && { error "Required partition is missing: $part"; return 1; }
+                  return 0
+              fi
+              copy_partition_metadata "$source_images" "$part"
+              rm -rf "$final_images/$part"
+              mv "$source_images/$part" "$final_images/$part"
+              record_final_filesystem "$role" "$part"
+              move_original_if_present "$role" "$part"
+          }
+
+          normalize_codename() {
+              local value="${1,,}"
+              value="${value%% *}"
+              printf '%s\n' "$value" | sed -E 's/_(global|eea|cn|in|india|id|ru|tw|tr|jp)(_global)?$//I; s/-(global|eea|cn|in|india|id|ru|tw|tr|jp)$//I'
+          }
+
+          usable_codename() {
+              case "$1" in
+                  ""|android|generic|generic_*|unknown|qssi|qssi_*|missi|missi_*|aosp|aosp_*|gsi|gsi_*|arm64|arm64_*|mainline|miproduct) return 1 ;;
+              esac
+              [[ "$1" =~ ^[a-z0-9][a-z0-9._-]{1,63}$ ]]
+          }
+
+          stock_codename_candidates() {
+              local primary file raw normalized
+              primary="$(tr -d '\r\n' < "$state_root/stock/ddevice/device_f.txt")"
+              printf '%s\n' "$(normalize_codename "$primary")"
+              while IFS= read -r -d '' file; do
+                  while IFS= read -r raw; do
+                      normalized="$(normalize_codename "$raw")"
+                      usable_codename "$normalized" && printf '%s\n' "$normalized"
+                  done < <(awk -F= '$1 == "ro.product.mod_device" || $1 == "ro.product.device" || $1 == "ro.product.product.device" || $1 == "ro.product.odm.device" || $1 == "ro.product.system.device" || $1 == "ro.product.system_ext.device" || $1 == "ro.product.vendor.device" || $1 == "ro.build.product" {print $2}' "$file")
+              done < <(find "$stock_images" -type f -name build.prop -print0)
+          }
+
+          copy_stock_device_features() {
+              local source_dir="$stock_images/product/etc/device_features"
+              local target_dir="$final_images/product/etc/device_features"
+              local source_file base candidate copied=0
+              local -a candidates=()
+              [[ -d "$source_dir" ]] || { warn "Stock device_features not present"; return 0; }
+              mapfile -t candidates < <(stock_codename_candidates | awk '!seen[$0]++')
+              mkdir -p "$target_dir"
+              shopt -s nullglob
+              for source_file in "$source_dir"/*.xml; do
+                  base="$(basename "$source_file" .xml)"
+                  for candidate in "${candidates[@]}"; do
+                      if [[ "$base" == "$candidate" || "$base" == "$candidate"* || "$candidate" == "$base"* ]]; then
+                          cp -f "$source_file" "$target_dir/$(basename "$source_file")"
+                          copied=$((copied + 1))
+                          break
+                      fi
+                  done
+              done
+              shopt -u nullglob
+              (( copied > 0 )) && mods "Stock device_features applied: $copied file(s)" || warn "No Stock device_features matched target codenames"
+          }
+
+          copy_stock_displayconfig() {
+              local source_dir="$stock_images/product/etc/displayconfig"
+              local target_dir="$final_images/product/etc/displayconfig"
+              local source_file relative copied=0
+              local -a display_files=()
+              [[ -d "$source_dir" ]] || { warn "Stock displayconfig not present"; return 0; }
+              mapfile -d '' -t display_files < <(find "$source_dir" -type f -name 'display_id_*.xml' -print0)
+              mkdir -p "$target_dir"
+              if (( ${#display_files[@]} == 0 )); then
+                  cp -a "$source_dir/." "$target_dir/"
+                  mods "Stock displayconfig applied"
+                  return 0
+              fi
+              for source_file in "${display_files[@]}"; do
+                  relative="${source_file#"$source_dir"/}"
+                  mkdir -p "$(dirname "$target_dir/$relative")"
+                  cp -f "$source_file" "$target_dir/$relative"
+                  copied=$((copied + 1))
+              done
+              mods "Stock display_id configs applied: $copied file(s)"
+          }
+
+          copy_stock_overlay() {
+              local filename="$1" source_file
+              local target_dir="$final_images/product/overlay"
+              source_file="$(find "$stock_images/product/overlay" -maxdepth 1 -type f -iname "$filename" -print -quit 2>/dev/null || true)"
+              [[ -n "$source_file" ]] || { warn "Stock overlay not present: $filename"; return 0; }
+              mkdir -p "$target_dir"
+              cp -f "$source_file" "$target_dir/$(basename "$source_file")"
+          }
+
+          copy_stock_camera_and_biometric() {
+              if [[ -f "$stock_images/product/priv-app/MiuiCamera/MiuiCamera.apk" ]]; then
+                  mkdir -p "$final_images/product/priv-app/MiuiCamera"
+                  cp -f "$stock_images/product/priv-app/MiuiCamera/MiuiCamera.apk" "$final_images/product/priv-app/MiuiCamera/MiuiCamera.apk"
+              else
+                  warn "Stock MiuiCamera.apk not present"
+              fi
+              if [[ -f "$stock_images/product/app/Biometric/Biometric.apk" ]]; then
+                  mkdir -p "$final_images/product/app/Biometric"
+                  cp -f "$stock_images/product/app/Biometric/Biometric.apk" "$final_images/product/app/Biometric/Biometric.apk"
+              elif [[ -f "$stock_images/product/app/MiuiBiometric/MiuiBiometric.apk" ]]; then
+                  mkdir -p "$final_images/product/app/MiuiBiometric"
+                  cp -f "$stock_images/product/app/MiuiBiometric/MiuiBiometric.apk" "$final_images/product/app/MiuiBiometric/MiuiBiometric.apk"
+              else
+                  warn "Stock biometric APK not present"
+              fi
+          }
+
+          copy_missing_stock_vndk() {
+              local source_dir="$stock_images/system_ext/apex"
+              local target_dir="$final_images/system_ext/apex"
+              local source_file target copied=0
+              local -a vndk_files=()
+              [[ -d "$source_dir" ]] || { warn "Stock system_ext/apex not present"; return 0; }
+              mapfile -t vndk_files < <(find "$source_dir" -maxdepth 1 -type f -name 'com.android.vndk.v*.apex' | sort -V)
+              mkdir -p "$target_dir"
+              for source_file in "${vndk_files[@]}"; do
+                  target="$target_dir/$(basename "$source_file")"
+                  [[ -e "$target" ]] && continue
+                  cp -f "$source_file" "$target"
+                  copied=$((copied + 1))
+              done
+              (( copied > 0 )) && mods "Stock VNDK compatibility added: $copied file(s)" || mods "Port already contains required Stock VNDK files"
+          }
+
+          apply_stock_compatibility() {
+              local generation
+              generation="$(tr -d '\r\n' < "$state_root/port/ddevice/rom_os.txt")"
+              copy_stock_device_features
+              copy_stock_displayconfig
+              [[ "$generation" == MIUI ]] && return 0
+              copy_stock_overlay AOSPFrameworkResOverlay.apk
+              copy_stock_overlay DevicesAndroidOverlay.apk
+              copy_stock_overlay DevicesOverlay.apk
+              copy_stock_overlay MiuiFrameworkResOverlay.apk
+              copy_stock_camera_and_biometric
+              copy_missing_stock_vndk
+          }
+
+          snapshot_original_partitions() {
+              local image part
+              mkdir -p "$stamp_root"
+              rm -f "$stamp_root"/*.sha256 2>/dev/null || true
+              shopt -s nullglob
+              for image in "$final_originals"/*.img; do
+                  part="$(basename "$image" .img)"
+                  [[ -d "$final_images/$part" ]] || continue
+                  python3 "$stamp_tool" stamp "$final_images/$part" > "$stamp_root/$part.sha256"
+              done
+              shopt -u nullglob
+          }
+
+          require_dir "$stock_images" "Stock images"
+          require_dir "$port_images" "Port images"
+          require_dir "$port_images/system" "Port system partition"
+          require_dir "$port_images/system_ext" "Port system_ext partition"
+          require_dir "$port_images/product" "Port product partition"
+          require_dir "$stock_images/vendor" "Stock vendor partition"
+          require_dir "$stock_images/odm" "Stock odm partition"
+
+          port_generation="$(tr -d '\r\n' < "$state_root/port/ddevice/rom_os.txt")"
+          [[ "$port_generation" == MIUI ]] || require_dir "$port_images/mi_ext" "Port mi_ext partition"
+
+          rm -rf "$final_root" "$stamp_root"
+          mkdir -p "$final_images" "$final_originals"
+          : > "$final_fs_map"
+
+          move_partition "$port_images" port system true
+          move_partition "$port_images" port system_ext true
+          move_partition "$port_images" port product true
+          if [[ "$port_generation" != MIUI ]]; then
+              move_partition "$port_images" port mi_ext true
+          else
+              move_partition "$port_images" port mi_ext false
+          fi
+
+          if [[ -d "$port_images/mi_product" ]]; then
+              move_partition "$port_images" port mi_product false
+          else
+              move_partition "$stock_images" stock mi_product false
+          fi
+
+          move_partition "$stock_images" stock vendor true
+          move_partition "$stock_images" stock odm true
+          move_partition "$stock_images" stock vendor_dlkm false
+          move_partition "$stock_images" stock odm_dlkm false
+          move_partition "$stock_images" stock system_dlkm false
+          move_partition "$stock_images" stock product_dlkm false
+
+          find "$stock_images" -maxdepth 1 -type f -exec mv -f {} "$final_images/" \;
+          [[ -d "$stock_root/firmware-update" ]] && mv "$stock_root/firmware-update" "$final_root/" || true
+
+          apply_stock_compatibility
+          snapshot_original_partitions
+          mods "Stock + Port guide merge completed"
+          rm -rf "$stock_root" "$port_root"
+          SH
+          chmod +x bin/port/merge.sh
+
+          cat > packROM.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          work_dir="$(pwd)"
+          source "$work_dir/functions.sh"
+          tools_dir="$work_dir/bin/$(uname)/$(uname -m)"
+          export PATH="$tools_dir:$PATH"
+
+          super_list="vendor mi_ext mi_product odm odm_dlkm system system_dlkm vendor_dlkm product product_dlkm system_ext"
+          images_root="$work_dir/build/baserom/images"
+          originals_root="$work_dir/build/baserom/original_images"
+          state_root="$work_dir/build/.port_state"
+          fs_map="$state_root/final_partition_fs_map.txt"
+          changed_map="$state_root/changed_original_partitions.txt"
+
+          androidVER="$(cat "$work_dir/bin/ddevice/androidver.txt")"
+          rom_os="$(cat "$work_dir/bin/ddevice/rom_os.txt")"
+          device_code="$(cat "$work_dir/bin/ddevice/device_f.txt")"
+          getvar="$device_code"
+
+          filesystem_for() {
+              local part="$1"
+              awk -F= -v name="$part" '$1 == name {print $2; exit}' "$fs_map"
+          }
+
+          original_changed() {
+              local part="$1"
+              [[ -s "$changed_map" ]] && grep -Fxq "$part" "$changed_map"
+          }
+
+          reuse_original() {
+              local part="$1" source="$originals_root/$part.img" target="$images_root/$part.img"
+              [[ -s "$source" ]] || return 1
+              rm -f "$target"
+              ln "$source" "$target" 2>/dev/null || cp -f "$source" "$target"
+              repack "Reusing original [$part.img]"
+          }
+
+          partition_size() {
+              local part="$1" content_size add_size
+              content_size="$(du -sb "$images_root/$part" | awk '{print $1}')"
+              if [[ "$androidVER" == 12 ]]; then
+                  case "$part" in
+                      odm) add_size=104217728 ;;
+                      system) add_size=114217728 ;;
+                      vendor|system_ext|product) add_size=104217728 ;;
+                      *) add_size=8054432 ;;
+                  esac
+              else
+                  case "$part" in
+                      mi_ext|odm|system|vendor|system_ext|product) add_size=100000000 ;;
+                      *) add_size=8054432 ;;
+                  esac
+              fi
+              printf '%s\n' "$((content_size + add_size))"
+          }
+
+          fix_partition_metadata() {
+              local part="$1"
+              python3 "$work_dir/bin/fix_selinux.py" \
+                  "$images_root/$part" \
+                  "$images_root/config/${part}_fs_config" \
+                  "$images_root/config/${part}_file_contexts" >/dev/null 2>&1
+          }
+
+          pack_ext_partition() {
+              local part="$1" size="$2"
+              make_ext4fs -J -T "$(date +%s)" \
+                  -S "$images_root/config/${part}_file_contexts" \
+                  -l "$size" \
+                  -C "$images_root/config/${part}_fs_config" \
+                  -L "$part" -a "$part" \
+                  "$images_root/$part.img" "$images_root/$part" >/dev/null 2>&1
+          }
+
+          pack_erofs_partition() {
+              local part="$1"
+              mkfs.erofs --quiet -zlz4hc,9 --mount-point "$part" \
+                  --fs-config-file="$images_root/config/${part}_fs_config" \
+                  --file-contexts="$images_root/config/${part}_file_contexts" \
+                  "$images_root/$part.img" "$images_root/$part" >/dev/null 2>&1
+          }
+
+          repack_partition() {
+              local part="$1" filesystem size
+              filesystem="$(filesystem_for "$part")"
+              [[ -n "$filesystem" ]] || { error "Missing final filesystem metadata for $part"; return 1; }
+              fix_partition_metadata "$part"
+              case "$filesystem" in
+                  EXT)
+                      size="$(partition_size "$part")"
+                      pack_ext_partition "$part" "$size"
+                      ;;
+                  EROFS) pack_erofs_partition "$part" ;;
+                  *) error "Unsupported final filesystem for $part: $filesystem"; return 1 ;;
+              esac
+              [[ -s "$images_root/$part.img" ]] || { error "Packing [$part] failed"; return 1; }
+              repack "Packing [$part.img] success ($filesystem)"
+          }
+
+          prepare_partition_image() {
+              local part="$1"
+              [[ -d "$images_root/$part" ]] || return 0
+              if [[ -s "$originals_root/$part.img" ]] && ! original_changed "$part"; then
+                  reuse_original "$part"
+              else
+                  repack_partition "$part"
+              fi
+          }
+
+          [[ -s "$fs_map" ]] || { error "Final partition filesystem map is missing"; exit 1; }
+          superSize="$(bash "$work_dir/bin/getSuperSize.sh" "$getvar")"
+          repack "Super image size: $superSize"
+          repack "Preparing guide-based partition images"
+
+          for pname in $super_list; do
+              prepare_partition_image "$pname"
+          done
+
+          if grep -q "ro.build.ab_update=true" "$images_root/vendor/build.prop"; then
+              is_ab_device=true
+          else
+              is_ab_device=false
+          fi
+
+          if [[ "$is_ab_device" == false ]]; then
+              repack "Packing super.img for A-only device"
+              GROUP_SIZE=$((superSize - 268435456))
+              lpargs="-F --output $images_root/super.img --metadata-size 65536 --super-name super --metadata-slots 2 --block-size 4096 --device super:$superSize --group=qti_dynamic_partitions:$GROUP_SIZE"
+              for pname in $super_list; do
+                  [[ -f "$images_root/$pname.img" ]] || continue
+                  subsize="$(du -sb "$images_root/$pname.img" | awk '{print $1}')"
+                  repack "Super sub-partition [$pname] size: [$subsize]"
+                  lpargs+=" --partition ${pname}:readonly:${subsize}:qti_dynamic_partitions --image ${pname}=$images_root/$pname.img"
+              done
+          else
+              repack "Packing super.img for V-AB device"
+              GROUP_SIZE=$((superSize - 268435456))
+              lpargs="-F --sparse --virtual-ab --output $images_root/super.img --metadata-size 65536 --super-name super --metadata-slots 3 --block-size 4096 --device super:$superSize --group=qti_dynamic_partitions_a:$GROUP_SIZE --group=qti_dynamic_partitions_b:$GROUP_SIZE"
+              for pname in $super_list; do
+                  [[ -f "$images_root/$pname.img" ]] || continue
+                  subsize="$(du -sb "$images_root/$pname.img" | awk '{print $1}')"
+                  repack "Super sub-partition [$pname] size: [$subsize]"
+                  lpargs+=" --partition ${pname}_a:readonly:${subsize}:qti_dynamic_partitions_a --image ${pname}_a=$images_root/$pname.img --partition ${pname}_b:readonly:0:qti_dynamic_partitions_b"
+              done
+          fi
+
+          [[ "$lpargs" == *"--partition "* ]] || { error "No partitions to pack into super.img"; exit 1; }
+          lpmake $lpargs
+          [[ -s "$images_root/super.img" ]] || { error "Unable to pack super.img"; exit 1; }
+          repack "Successfully packed super.img"
+
+          for pname in $super_list; do
+              rm -f "$images_root/$pname.img" 2>/dev/null || true
+          done
+          rm -rf "$originals_root" "$state_root/original_tree_stamps"
+          find "$work_dir/build" -exec touch -t 200901010000.00 {} + 2>/dev/null || true
+          SH
+          chmod +x packROM.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("README.MD")
+          text = path.read_text()
+          marker = "## Partition ownership\n"
+          section = '''## Guide + video Port core\n\nThe Port stage preserves source partition images before unpacking. The guide ownership is applied generically to every supported device: Port `system`/`mi_ext` are eligible for original-image reuse, Stock hardware partitions are eligible for original-image reuse, while Port `product` and `system_ext` are rebuilt after Stock compatibility files are applied. If a later DeadZone modification changes a preserved partition, only that changed partition is rebuilt with its recorded source filesystem; untouched preserved partitions reuse their original image.\n\nDevice-feature selection is derived from Stock ROM codenames and matching family variants rather than hardcoded device names. Display compatibility prefers Stock `display_id_*.xml` files when present, with full `displayconfig` as the fallback. Missing `com.android.vndk.v*.apex` files from Stock are added to Port `system_ext` without replacing versions already supplied by the Port ROM.\n\nFilesystem type is recorded per partition during extraction and carried into the final merge, so mixed EXT4/EROFS source layouts no longer depend on one global `fstype.txt` during partition repacking.\n\n'''
+          if marker not in text:
+              raise SystemExit("README partition marker missing")
+          if "## Guide + video Port core" not in text:
+              text = text.replace(marker, section + marker, 1)
+          path.write_text(text)
+          PY
+
+      - name: Validate scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          bash -n build.sh
+          bash -n bin/port/prepare.sh
+          bash -n bin/port/merge.sh
+          bash -n packROM.sh
+          python3 -m py_compile bin/port/partition_state.py notify.py
+          git diff --check
+
+      - name: Test partition state helper
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          root="$(mktemp -d)"
+          mkdir -p "$root/images/system/etc" "$root/originals" "$root/stamps"
+          printf 'a\n' > "$root/images/system/etc/build.prop"
+          printf 'img\n' > "$root/originals/system.img"
+          python3 bin/port/partition_state.py stamp "$root/images/system" > "$root/stamps/system.sha256"
+          test -z "$(python3 bin/port/partition_state.py changes "$root/images" "$root/originals" "$root/stamps")"
+          printf 'b\n' >> "$root/images/system/etc/build.prop"
+          test "$(python3 bin/port/partition_state.py changes "$root/images" "$root/originals" "$root/stamps")" = system
+          rm -rf "$root"
+
+      - name: Synthetic guide merge test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          rm -rf build
+          mkdir -p build/.port_state/{stock,port}/ddevice
+          printf 'sapphire\n' > build/.port_state/stock/ddevice/device_f.txt
+          printf 'OS3\n' > build/.port_state/port/ddevice/rom_os.txt
+          printf '%s\n' 'product=EROFS' 'system_ext=EROFS' 'system=EROFS' 'mi_ext=EROFS' > build/.port_state/port/partition_fs_map.txt
+          printf '%s\n' 'product=EXT' 'system_ext=EXT' 'vendor=EXT' 'odm=EXT' 'system_dlkm=EXT' 'vendor_dlkm=EXT' > build/.port_state/stock/partition_fs_map.txt
+
+          for role in stock port; do
+            mkdir -p "build/${role}rom/images/config" "build/${role}rom/original_images"
+          done
+          for part in product system_ext vendor odm system_dlkm vendor_dlkm; do
+            mkdir -p "build/stockrom/images/$part"
+            : > "build/stockrom/images/config/${part}_fs_config"
+            printf '/ u:object_r:system_file:s0\n' > "build/stockrom/images/config/${part}_file_contexts"
+          done
+          for part in product system_ext system mi_ext; do
+            mkdir -p "build/portrom/images/$part"
+            : > "build/portrom/images/config/${part}_fs_config"
+            printf '/ u:object_r:system_file:s0\n' > "build/portrom/images/config/${part}_file_contexts"
+          done
+
+          mkdir -p build/stockrom/images/product/etc/device_features
+          printf sapphire > build/stockrom/images/product/etc/device_features/sapphire.xml
+          printf sapphiren > build/stockrom/images/product/etc/device_features/sapphiren.xml
+          printf houji > build/stockrom/images/product/etc/device_features/houji.xml
+          mkdir -p build/stockrom/images/product/etc/displayconfig
+          printf display > build/stockrom/images/product/etc/displayconfig/display_id_0.xml
+          printf other > build/stockrom/images/product/etc/displayconfig/unrelated.xml
+          mkdir -p build/stockrom/images/product/overlay
+          for apk in AOSPFrameworkResOverlay.apk DevicesAndroidOverlay.apk DevicesOverlay.apk MiuiFrameworkResOverlay.apk; do
+            printf apk > "build/stockrom/images/product/overlay/$apk"
+          done
+          mkdir -p build/stockrom/images/product/priv-app/MiuiCamera
+          printf camera > build/stockrom/images/product/priv-app/MiuiCamera/MiuiCamera.apk
+          mkdir -p build/stockrom/images/product/app/Biometric
+          printf bio > build/stockrom/images/product/app/Biometric/Biometric.apk
+          mkdir -p build/stockrom/images/system_ext/apex build/portrom/images/system_ext/apex
+          for v in 30 31 32 33; do printf v > "build/stockrom/images/system_ext/apex/com.android.vndk.v${v}.apex"; done
+          printf v34 > build/portrom/images/system_ext/apex/com.android.vndk.v34.apex
+
+          for part in vendor odm system_dlkm vendor_dlkm; do printf "$part" > "build/stockrom/original_images/$part.img"; done
+          for part in system mi_ext; do printf "$part" > "build/portrom/original_images/$part.img"; done
+
+          bash bin/port/merge.sh
+
+          test -f build/baserom/images/product/etc/device_features/sapphire.xml
+          test -f build/baserom/images/product/etc/device_features/sapphiren.xml
+          test ! -f build/baserom/images/product/etc/device_features/houji.xml
+          test -f build/baserom/images/product/etc/displayconfig/display_id_0.xml
+          test ! -f build/baserom/images/product/etc/displayconfig/unrelated.xml
+          for v in 30 31 32 33 34; do test -f "build/baserom/images/system_ext/apex/com.android.vndk.v${v}.apex"; done
+          for part in system mi_ext vendor odm system_dlkm vendor_dlkm; do test -f "build/baserom/original_images/$part.img"; done
+          grep -Fxq 'system=EROFS' build/.port_state/final_partition_fs_map.txt
+          grep -Fxq 'vendor=EXT' build/.port_state/final_partition_fs_map.txt
+          rm -rf build
+
+      - name: Commit target main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          git config user.name "DeadZone Automation"
+          git config user.email "actions@deadzone.local"
+          git add build.sh bin/port/prepare.sh bin/port/partition_state.py bin/port/merge.sh packROM.sh README.MD
+          git diff --cached --exit-code && { echo "No changes to commit" >&2; exit 1; }
+          git commit -m "port: implement guide based original image flow"
+          git push origin main
+          git rev-parse HEAD
