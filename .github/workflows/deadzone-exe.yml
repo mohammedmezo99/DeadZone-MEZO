@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Rebuild marker: DeadZone_EXE main bb83f150 · 2026-08-18
+# Rebuild marker: DeadZone_EXE main 1bc29978 · 2026-08-18
 
 run-name: 🖥️ DeadZone_exe · main · ${{ github.run_id }}
 
@@ -294,5 +294,239 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: engine/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: ☁️ Publish Drive + Flash Guide
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 🔐 Validate publisher credential
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || {
+            echo "::error::Missing shared publisher credential: GH_TOKEN"
+            exit 1
+          }
+
+      - name: 🔒 Checkout central Drive runtime
+        uses: actions/checkout@v5
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            build.env
+            rclone.conf
+          sparse-checkout-cone-mode: false
+
+      - name: ⚙️ Load Drive destination
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          wanted = {"RCLONE_REMOTE_NAME", "RCLONE_UPLOAD_DIR"}
+          loaded = {}
+          for raw_line in Path("runtime/build.env").read_text(encoding="utf-8").splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              if key in wanted:
+                  loaded[key] = value.strip()
+
+          missing = wanted - loaded.keys()
+          if missing:
+              raise SystemExit("Missing Drive runtime values: " + ", ".join(sorted(missing)))
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              for key in sorted(wanted):
+                  output.write(f"{key}={loaded[key]}\n")
+
+      - name: 🧰 Install publish tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rclone zip
+          rclone version
+
+      - name: 📥 Download all EXE artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: DeadZone-*
+          path: publish/artifacts
+
+      - name: 📥 Checkout EXE version source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.resolve.outputs.engine_repository }}
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: engine-release
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 🏷️ Resolve EXE version
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          brand = Path("engine-release/core/brand.py").read_text(encoding="utf-8")
+          match = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', brand, re.MULTILINE)
+          if not match:
+              raise SystemExit("Unable to resolve APP_VERSION from DeadZone_EXE")
+          version = match.group(1).strip()
+          if not re.fullmatch(r"[A-Za-z0-9._+-]+", version):
+              raise SystemExit("DeadZone_EXE APP_VERSION is unsafe for publishing")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"DEADZONE_EXE_VERSION={version}\n")
+
+      - name: 🗜️ Package platform releases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p publish/packages
+          expected=(DeadZone-Windows DeadZone-Linux DeadZone-macOS-arm64 DeadZone-macOS-x64)
+          for artifact in "${expected[@]}"; do
+            source_dir="publish/artifacts/${artifact}"
+            [[ -d "$source_dir" ]] || {
+              echo "::error::Missing downloaded artifact: ${artifact}"
+              exit 1
+            }
+            if [[ "$artifact" != "DeadZone-Windows" ]]; then
+              find "$source_dir" -type f \( -name DeadZone -o -name fastboot \) -exec chmod +x {} +
+            fi
+            case "$artifact" in
+              DeadZone-Windows) suffix="Windows-x64" ;;
+              DeadZone-Linux) suffix="Linux-x64" ;;
+              DeadZone-macOS-arm64) suffix="macOS-arm64" ;;
+              DeadZone-macOS-x64) suffix="macOS-x64" ;;
+            esac
+            filename="DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-${suffix}.zip"
+            (cd "$source_dir" && zip -qry "$GITHUB_WORKSPACE/publish/packages/$filename" .)
+            [[ -s "publish/packages/$filename" ]] || {
+              echo "::error::Release archive was not created: ${filename}"
+              exit 1
+            }
+          done
+          (cd publish/packages && sha256sum *.zip > SHA256SUMS.txt)
+
+      - name: ☁️ Upload releases to Google Drive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          install -m 600 runtime/rclone.conf publish/rclone.conf
+          if ! rclone --config=publish/rclone.conf listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
+            echo "::error::Central rclone.conf does not define expected remote"
+            exit 1
+          fi
+
+          remote_dir="${RCLONE_UPLOAD_DIR%/}/Tools/DeadZone_EXE/v${DEADZONE_EXE_VERSION}"
+          : > publish/links.tsv
+
+          publish_release() {
+            local platform="$1" arch="$2" recommended="$3" filename="$4"
+            local local_file="publish/packages/${filename}"
+            local remote_file="${RCLONE_REMOTE_NAME}:${remote_dir}/${filename}"
+            rclone --config=publish/rclone.conf copyto --retries 3 "$local_file" "$remote_file"
+            local url
+            url="$(rclone --config=publish/rclone.conf link "$remote_file" 2>/dev/null | tail -n1 | tr -d '\r')"
+            [[ "$url" == https://drive.google.com/* ]] || {
+              echo "::error::Google Drive did not return a public HTTPS link for ${filename}"
+              exit 1
+            }
+            printf '%s\t%s\t%s\t%s\t%s\n' "$platform" "$arch" "$recommended" "$filename" "$url" >> publish/links.tsv
+          }
+
+          publish_release "Windows" "x64" "true" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Windows-x64.zip"
+          publish_release "Linux" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Linux-x64.zip"
+          publish_release "macOS" "ARM64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-arm64.zip"
+          publish_release "macOS" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-x64.zip"
+          rclone --config=publish/rclone.conf copyto --retries 3 publish/packages/SHA256SUMS.txt "${RCLONE_REMOTE_NAME}:${remote_dir}/SHA256SUMS.txt"
+
+      - name: 🧾 Build Flash Guide release manifest
+        shell: python
+        run: |
+          import csv
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          downloads = []
+          with Path("publish/links.tsv").open(encoding="utf-8", newline="") as source:
+              for platform, arch, recommended, filename, url in csv.reader(source, delimiter="\t"):
+                  downloads.append(
+                      {
+                          "platform": platform,
+                          "arch": arch,
+                          "filename": filename,
+                          "url": url,
+                          "recommended": recommended == "true",
+                      }
+                  )
+
+          if len(downloads) != 4:
+              raise SystemExit(f"Expected four published EXE downloads, found {len(downloads)}")
+
+          payload = {
+              "version": os.environ["DEADZONE_EXE_VERSION"],
+              "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "downloads": downloads,
+          }
+          Path("publish/flash-tool.json").write_text(
+              json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+
+      - name: 🌐 Checkout DeadZone website
+        uses: actions/checkout@v5
+        with:
+          repository: mohammedmezo99/Deadzone
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: website
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: 🔄 Publish links to Flash Guide
+        shell: bash
+        working-directory: website
+        run: |
+          set -Eeuo pipefail
+          install -m 644 "$GITHUB_WORKSPACE/publish/flash-tool.json" src/data/flash-tool.json
+          git config user.name "DeadZone Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/data/flash-tool.json
+          if git diff --cached --quiet; then
+            echo "Flash Guide already contains these EXE links."
+            exit 0
+          fi
+          git commit -m "Update Fastboot Flasher v${DEADZONE_EXE_VERSION} downloads"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: 📦 Preserve published release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeadZone-EXE-release-v${{ env.DEADZONE_EXE_VERSION }}
+          path: |
+            publish/flash-tool.json
+            publish/packages/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
