@@ -81,16 +81,21 @@ jobs:
               ):
                   raise SystemExit(f"{name} must be a safe HTTPS URL")
 
-      - name: 🔐 Validate runtime bootstrap token
+      - name: 🔐 Validate publishing credentials
         shell: bash
         env:
           DEADZONE_RUNTIME_TOKEN: ${{ secrets.GH_TOKEN }}
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
           set -Eeuo pipefail
-          [[ -n "${DEADZONE_RUNTIME_TOKEN:-}" ]] || {
-            echo 'GH_TOKEN is required to read DeadZone-File.' >&2
-            exit 1
-          }
+          required=(DEADZONE_RUNTIME_TOKEN SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Missing required publishing secret: ${variable_name}"
+              exit 1
+            fi
+          done
 
       - name: 📥 Checkout DeadZone launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -119,8 +124,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          for key in DEADZONE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR BUILD_PROGRESS_SECRET; do
-            [[ -n "${!key:-}" ]] || { echo "Missing runtime value: $key" >&2; exit 1; }
+          required=(
+            DEADZONE_ENGINE_REPOSITORY
+            PRIVATE_REPO_TOKEN
+            RCLONE_REMOTE_NAME
+            RCLONE_UPLOAD_DIR
+            BUILD_PROGRESS_SECRET
+          )
+          for variable_name in "${required[@]}"; do
+            [[ -n "${!variable_name:-}" ]] || {
+              echo "Missing runtime value: $variable_name" >&2
+              exit 1
+            }
           done
           [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-xiaomi_Port" ]] || {
             echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
@@ -128,14 +143,6 @@ jobs:
           }
           echo "::add-mask::$BUILD_PROGRESS_SECRET"
           echo "DEADZONE_EVENT_SECRET=$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
-
-      - name: 📡 Correlate accepted Port request
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 runtime/report_build_event.py running \
-            --project port \
-            --message "DeadZone Port request accepted by GitHub Actions." || true
 
       - name: ⚡ Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
@@ -185,62 +192,162 @@ jobs:
         working-directory: toolbuild
         run: sudo chmod 777 -R *
 
+      - name: ☁️ Install central rclone config
+        shell: bash
+        working-directory: toolbuild
+        run: |
+          set -Eeuo pipefail
+          source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
+          target_file="$PWD/rclone.conf"
+          [[ -s "$source_file" ]] || {
+            echo "::error::Central rclone config missing or empty: $source_file"
+            exit 1
+          }
+          install -m 600 "$source_file" "$target_file"
+          if ! rclone --config="$target_file" listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
+            echo "::error::Central rclone.conf does not define expected remote: ${RCLONE_REMOTE_NAME}"
+            exit 1
+          fi
+          rclone version
+
       - name: 🔂 Build Stock + Port ROM
         working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
+          set -Eeuo pipefail
           sudo -E bash build.sh \
             "$DEADZONE_STOCK_ROM_URL" \
             "$DEADZONE_PORT_ROM_URL" \
             "$DEADZONE_SOURCE_REPOSITORY" \
             port \
             "$DEADZONE_BUILDER_NAME" \
-            "$DEADZONE_BUILDER_ID"
-
-      - name: 📦 Report packing phase
-        working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
-        run: |
-          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+            "$DEADZONE_BUILDER_ID" \
+            2>&1 | tee build_action.log
 
       - name: 📦 Pack Port ROM
         working-directory: toolbuild
-        run: sudo -E bash packROM.sh
-
-      - name: ☁️ Install central rclone config
-        shell: bash
+        env:
+          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
           set -Eeuo pipefail
-          SRC="$GITHUB_WORKSPACE/runtime/rclone.conf"
-          DST="$GITHUB_WORKSPACE/toolbuild/rclone.conf"
+          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
-          test -s "$SRC" || {
-            echo "::error::Central rclone config missing or empty: $SRC"
-            exit 1
-          }
-
-          mkdir -p "$(dirname "$DST")"
-          install -m 600 "$SRC" "$DST"
-
-          test -s "$DST" || {
-            echo "::error::rclone config install failed: $DST"
-            exit 1
-          }
-
-          echo "✅ rclone config installed"
-
-      - name: ☁️ Report upload phase
+      - name: 🗜️ Package and upload Google Drive
         working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
+          set -Eeuo pipefail
           python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
-      - name: ☁️ Upload DeadZone Port
+          set +e
+          sudo -E bash bin/port/uploadROM.sh 2>&1 | tee -a build_action.log
+          google_status=${PIPESTATUS[0]}
+          set -e
+          printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
+
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          if (( ${#final_zips[@]} != 1 )); then
+            echo "::error::Expected exactly one preserved final Port ZIP; found ${#final_zips[@]}"
+            exit 1
+          fi
+
+          final_zip="${final_zips[0]}"
+          final_name="$(basename "$final_zip")"
+          python3 -m zipfile -t "$final_zip" >/dev/null || {
+            echo "::error::Final Port ZIP failed archive integrity validation: ${final_name}"
+            exit 1
+          }
+
+          final_size_bytes="$(stat -c '%s' "$final_zip")"
+          final_size_human="$(python3 - "$final_size_bytes" <<'PY'
+          import sys
+          size = int(sys.argv[1])
+          value = float(size)
+          for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+              if value < 1024 or unit == "TiB":
+                  print(f"{size} B" if unit == "B" else f"{value:.2f} {unit}")
+                  break
+              value /= 1024
+          PY
+          )"
+          printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' \
+            "$final_size_human" "$final_name" >> "$GITHUB_ENV"
+
+      - name: ⬆️ Upload SourceForge and PixelDrain
         working-directory: toolbuild
-        run: sudo -E bash bin/port/uploadROM.sh
+        env:
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source "$GITHUB_WORKSPACE/runtime/upload.env"
+          set +a
+
+          required_mirror_values=(SOURCEFORGE_USERNAME SOURCEFORGE_PROJECT SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required_mirror_values[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Mirror runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          (( ${#final_zips[@]} == 1 )) || {
+            echo "::error::Final Port ZIP is unavailable for mirror upload"
+            exit 1
+          }
+          final_zip="${final_zips[0]}"
+          final_name="$(basename "$final_zip")"
+
+          stock_state="$PWD/build/.port_state/stock/ddevice"
+          port_state="$PWD/build/.port_state/port/ddevice"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$stock_state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$port_state/base_rom_code.txt")"
+          if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
+            os_folder="${BASH_REMATCH[1]}"
+          elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
+            os_folder="MIUI${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unable to derive mirror OS folder from Port ROM version: ${rom_version}"
+            exit 1
+          fi
+
+          google_status="${DEADZONE_GOOGLE_UPLOAD_STATUS:-1}"
+          drive_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
+          if (( google_status == 0 )) && [[ -z "$drive_url" ]]; then
+            drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/Port/${codename}/${os_folder}/${final_name}"
+            drive_url="$(rclone --config="$PWD/rclone.conf" link "$drive_remote" 2>/dev/null | tail -n1 | tr -d '\r' || true)"
+            if [[ -n "$drive_url" ]]; then
+              printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\nDEADZONE_RESULT_URL=%s\n' "$drive_url" "$drive_url" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          if (( google_status == 0 )) && [[ -n "$drive_url" ]]; then
+            export DEADZONE_SET_RESULT_URL=0
+          else
+            echo "::warning::Google Drive is unavailable as a final public link; secondary mirrors may rescue the release"
+            export DEADZONE_SET_RESULT_URL=1
+          fi
+
+          set +e
+          bash "$GITHUB_WORKSPACE/runtime/upload-mirrors.sh" \
+            "Port" "$codename" "$os_folder" "$final_zip" "$final_name" \
+            2>&1 | tee -a build_action.log
+          mirror_status=${PIPESTATUS[0]}
+          set -e
+
+          if (( google_status != 0 && mirror_status != 0 )); then
+            echo "::error::Google Drive and all secondary ROM mirrors failed"
+            exit 1
+          fi
+          if (( mirror_status != 0 )); then
+            echo "::warning::Secondary mirrors failed, but Google Drive upload succeeded"
+          fi
 
       - name: ✅ Report successful Port build
         if: success()
@@ -248,7 +355,42 @@ jobs:
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
+          set -euo pipefail
           python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+
+      - name: 🌐 Publish Port release to website
+        if: success()
+        continue-on-error: true
+        working-directory: toolbuild
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${DEADZONE_RESULT_NAME:-}" ]] || {
+            echo "::warning::Website release skipped: final ZIP name is unavailable"
+            exit 0
+          }
+          stock_state="$PWD/build/.port_state/stock/ddevice"
+          port_state="$PWD/build/.port_state/port/ddevice"
+          python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
+            --request-id "$DEADZONE_REQUEST_ID" \
+            --edition-version "$(tr -d '\r\n' < Version)" \
+            --codename "$(tr -d '\r\n' < "$stock_state/device_f.txt")" \
+            --rom-version "$(tr -d '\r\n' < "$port_state/base_rom_code.txt")" \
+            --android-version "$(tr -d '\r\n' < "$port_state/androidver.txt")" \
+            --region "$(tr -d '\r\n' < "$stock_state/device_type.txt")" \
+            --filename "$DEADZONE_RESULT_NAME" \
+            --artifact-path "$PWD/out/$DEADZONE_RESULT_NAME" \
+            --google-drive-url "${DEADZONE_GOOGLE_DRIVE_URL:-}" \
+            --sourceforge-url "${DEADZONE_SOURCEFORGE_URL:-}" \
+            --pixeldrain-url "${DEADZONE_PIXELDRAIN_URL:-}"
+
+      - name: 🧹 Cleanup Port workspace
+        if: always()
+        run: |
+          sudo rm -rf toolbuild/out toolbuild/build
+          rm -rf runtime
+          rm -f toolbuild/rclone.conf
 
       - name: ❌ Report failed Port build
         if: failure()
