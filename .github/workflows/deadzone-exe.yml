@@ -1,11 +1,11 @@
 name: DeadZone_exe
-# Rebuild marker: DeadZone_EXE bundled-ROM runtime · c1a60ddf · 2026-08-19
+# Windows runtime regression check · external Fastboot · 2026-08-19
 
-run-name: 🖥️ DeadZone_exe · main · ${{ github.run_id }}
+run-name: 🖥️ DeadZone_exe Windows test · main · ${{ github.run_id }}
 
 concurrency:
   group: deadzone-exe-build-queue
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
@@ -98,29 +98,11 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Pinned DeadZone_EXE: $sha"
 
-  build:
-    name: 🛠️ ${{ matrix.artifact_name }}
+  windows:
+    name: 🛠️ DeadZone-Windows runtime test
     needs: resolve
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - os: windows-latest
-            artifact_name: DeadZone-Windows
-            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-windows.zip https://dl-ssl.google.com/android/repository/platform-tools-latest-windows.zip
-          - os: ubuntu-latest
-            artifact_name: DeadZone-Linux
-            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-linux.zip
-          - os: macos-latest
-            artifact_name: DeadZone-macOS-arm64
-            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
-          - os: macos-15-intel
-            artifact_name: DeadZone-macOS-x64
-            platform_tools_urls: https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
-
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: 📥 Checkout pinned DeadZone_EXE
@@ -138,28 +120,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 🐧 Prepare Linux Qt runtime
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-3 \
-            libegl1 \
-            libfontconfig1 \
-            libgl1 \
-            libxkbcommon0 \
-            libxkbcommon-x11-0 \
-            libxcb-cursor0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-render-util0 \
-            libxcb-shape0 \
-            libxcb-xinerama0 \
-            libxcb-xkb1
-
       - name: 📦 Install build dependencies
         working-directory: engine
         run: |
@@ -167,73 +127,16 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest
 
-      - name: 🐧 Smoke-test Linux Qt
-        if: runner.os == 'Linux'
-        working-directory: engine
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          set -Eeuo pipefail
-          python - <<'PY'
-          from PyQt6.QtWidgets import QApplication
-          from qfluentwidgets import FluentWindow
-
-          app = QApplication([])
-          window = FluentWindow()
-          window.close()
-          app.quit()
-          print("Linux Qt offscreen smoke test passed")
-          PY
-
       - name: 🧪 Compile and test engine
         working-directory: engine
         run: |
           python -m compileall -q app.py build.py core ui
           python -m pytest -q tests
 
-      - name: 🍎 Generate macOS icon
-        if: runner.os == 'macOS'
-        working-directory: engine
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          icon_dir="assets/icons"
-          icns_path="${icon_dir}/deadzone_logo.icns"
-          iconset_path="${icon_dir}/deadzone_logo.iconset"
-          source_png=""
-
-          [[ -f "$icns_path" ]] && exit 0
-          if [[ -f "${icon_dir}/deadzone_logo_1024.png" ]]; then
-            source_png="${icon_dir}/deadzone_logo_1024.png"
-          elif [[ -f "${icon_dir}/deadzone_logo.png" ]]; then
-            source_png="${icon_dir}/deadzone_logo.png"
-          else
-            exit 0
-          fi
-
-          rm -rf "$iconset_path"
-          mkdir -p "$iconset_path"
-          sips -z 16 16 "$source_png" --out "${iconset_path}/icon_16x16.png" >/dev/null
-          sips -z 32 32 "$source_png" --out "${iconset_path}/icon_16x16@2x.png" >/dev/null
-          sips -z 32 32 "$source_png" --out "${iconset_path}/icon_32x32.png" >/dev/null
-          sips -z 64 64 "$source_png" --out "${iconset_path}/icon_32x32@2x.png" >/dev/null
-          sips -z 128 128 "$source_png" --out "${iconset_path}/icon_128x128.png" >/dev/null
-          sips -z 256 256 "$source_png" --out "${iconset_path}/icon_128x128@2x.png" >/dev/null
-          sips -z 256 256 "$source_png" --out "${iconset_path}/icon_256x256.png" >/dev/null
-          sips -z 512 512 "$source_png" --out "${iconset_path}/icon_256x256@2x.png" >/dev/null
-          sips -z 512 512 "$source_png" --out "${iconset_path}/icon_512x512.png" >/dev/null
-          sips -z 1024 1024 "$source_png" --out "${iconset_path}/icon_512x512@2x.png" >/dev/null
-          iconutil -c icns "$iconset_path" -o "$icns_path"
-          rm -rf "$iconset_path"
-
-      - name: ⚡ Prepare embedded Android Fastboot runtime
+      - name: ⚡ Download Windows Fastboot runtime
         working-directory: engine
         shell: python
-        env:
-          PLATFORM_TOOLS_URLS: ${{ matrix.platform_tools_urls }}
         run: |
-          import os
           import shutil
           import time
           import urllib.error
@@ -241,7 +144,10 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          urls = os.environ["PLATFORM_TOOLS_URLS"].split()
+          urls = (
+              "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
+              "https://dl-ssl.google.com/android/repository/platform-tools-latest-windows.zip",
+          )
           archive_path = Path("platform-tools.zip")
 
           def download(url):
@@ -266,17 +172,11 @@ jobs:
           if not any(download(url) for url in urls):
               raise SystemExit("Unable to download Android platform-tools")
 
-          fastboot_name = "fastboot.exe" if os.name == "nt" else "fastboot"
-          required = [f"platform-tools/{fastboot_name}"]
-          optional = []
-          if os.name == "nt":
-              optional.extend(
-                  [
-                      "platform-tools/AdbWinApi.dll",
-                      "platform-tools/AdbWinUsbApi.dll",
-                  ]
-              )
-
+          required = (
+              "platform-tools/fastboot.exe",
+              "platform-tools/AdbWinApi.dll",
+              "platform-tools/AdbWinUsbApi.dll",
+          )
           destination = Path("platform-tools")
           shutil.rmtree(destination, ignore_errors=True)
           destination.mkdir(parents=True)
@@ -285,87 +185,72 @@ jobs:
               available = set(archive.namelist())
               missing = [member for member in required if member not in available]
               if missing:
-                  raise SystemExit(
-                      "Android platform-tools archive is missing: " + ", ".join(missing)
-                  )
-              for member in [*required, *(m for m in optional if m in available)]:
+                  raise SystemExit("Android platform-tools archive is missing: " + ", ".join(missing))
+              for member in required:
                   target = destination / Path(member).name
                   with archive.open(member) as source, target.open("wb") as output:
                       shutil.copyfileobj(source, output)
 
-          fastboot = destination / fastboot_name
-          if os.name != "nt":
-              fastboot.chmod(0o755)
           archive_path.unlink(missing_ok=True)
-          print(f"Embedded Fastboot runtime ready: {fastboot}")
+          print("External Windows Fastboot runtime prepared")
 
-      - name: 🏗️ Build DeadZone executable
+      - name: 🏗️ Build clean Windows EXE
         working-directory: engine
         run: python build.py --clean --onefile
 
-      - name: 🐧 Verify Linux executable linkage
-        if: runner.os == 'Linux'
+      - name: 📂 Stage Fastboot outside the EXE
         working-directory: engine
-        shell: bash
+        shell: python
         run: |
-          set -Eeuo pipefail
-          chmod +x dist/DeadZone
-          linkage="$(ldd dist/DeadZone || true)"
-          printf '%s\n' "$linkage"
-          if grep -Fq "not found" <<<"$linkage"; then
-            echo "::error::Linux executable has unresolved shared libraries"
-            exit 1
-          fi
+          import shutil
+          from pathlib import Path
 
-      - name: 🐧 Package Linux AppImage
-        if: runner.os == 'Linux'
-        working-directory: engine
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          appdir="DeadZone.AppDir"
-          rm -rf "$appdir"
-          mkdir -p "$appdir/usr/bin"
-          install -m 0755 dist/DeadZone "$appdir/usr/bin/DeadZone"
-          install -m 0644 assets/icons/deadzone_logo_256.png "$appdir/deadzone.png"
-          cat > "$appdir/DeadZone.desktop" <<'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=DeadZone Fastboot Flasher
-          Exec=DeadZone
-          Icon=deadzone
-          Categories=Utility;
-          Terminal=false
-          EOF
-          cat > "$appdir/AppRun" <<'EOF'
-          #!/bin/sh
-          APPDIR="$(dirname "$(readlink -f "$0")")"
-          exec "$APPDIR/usr/bin/DeadZone" "$@"
-          EOF
-          chmod +x "$appdir/AppRun"
-          curl --fail --location --retry 3 \
-            -o appimagetool-x86_64.AppImage \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool-x86_64.AppImage
-          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
-            "$appdir" dist/DeadZone-Linux.AppImage
-          chmod +x dist/DeadZone-Linux.AppImage
-          rm -f dist/DeadZone appimagetool-x86_64.AppImage
-          rm -rf "$appdir"
+          source = Path("platform-tools")
+          destination = Path("dist/META-INF/DeadZone/runtime/windows")
+          destination.mkdir(parents=True, exist_ok=True)
+          for name in ("fastboot.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
+              shutil.copy2(source / name, destination / name)
+          print(f"Fastboot runtime staged at {destination}")
 
-      - name: 🍎 Archive macOS app for artifact transport
-        if: runner.os == 'macOS'
+      - name: ⚡ Verify external Fastboot
         working-directory: engine
-        shell: bash
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          [[ -d dist/DeadZone.app ]] || {
-            echo "::error::DeadZone.app was not produced"
-            exit 1
+          $fastboot = Resolve-Path "dist/META-INF/DeadZone/runtime/windows/fastboot.exe"
+          & $fastboot --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "External Fastboot runtime failed its version check."
           }
-          tar -czf dist/DeadZone-macOS.app.tar.gz -C dist DeadZone.app
-          rm -rf dist/DeadZone.app
-          rm -f dist/DeadZone
+
+      - name: 🪟 Launch built EXE regression test
+        working-directory: engine
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/DeadZone.exe"
+          $localLog = Join-Path (Split-Path $exe) "DeadZone-crash.log"
+          $tempLog = Join-Path $env:TEMP "DeadZone-crash.log"
+          Remove-Item $localLog, $tempLog -Force -ErrorAction SilentlyContinue
+
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $process.Refresh()
+
+          if (Test-Path $localLog) {
+            Get-Content $localLog
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            throw "DeadZone.exe created a startup crash log."
+          }
+          if (Test-Path $tempLog) {
+            Get-Content $tempLog
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            throw "DeadZone.exe created a startup crash log in TEMP."
+          }
+          if ($process.HasExited) {
+            throw "DeadZone.exe exited during startup with code $($process.ExitCode)."
+          }
+
+          Stop-Process -Id $process.Id -Force
+          Write-Host "DeadZone.exe stayed alive for 8 seconds: runtime startup PASS"
 
       - name: 📏 Report package size
         working-directory: engine
@@ -375,296 +260,14 @@ jobs:
 
           files = [path for path in Path("dist").rglob("*") if path.is_file()]
           total = sum(path.stat().st_size for path in files)
-          print(f"DeadZone package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
+          print(f"DeadZone Windows test package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
           for path in sorted(files):
               print(f"  {path.relative_to('dist')}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
 
-      - name: 📤 Upload ${{ matrix.artifact_name }}
+      - name: 📤 Upload tested Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
+          name: DeadZone-Windows-Tested
           path: engine/dist/
-          if-no-files-found: error
-          retention-days: 30
-
-  publish:
-    name: ☁️ Publish Drive + Flash Guide
-    needs:
-      - resolve
-      - build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: 🔐 Validate publisher credential
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          [[ -n "${GH_TOKEN:-}" ]] || {
-            echo "::error::Missing shared publisher credential: GH_TOKEN"
-            exit 1
-          }
-
-      - name: 🔒 Checkout central Drive runtime
-        uses: actions/checkout@v5
-        with:
-          repository: mohammedmezo99/DeadZone-File
-          ref: main
-          token: ${{ secrets.GH_TOKEN }}
-          path: runtime
-          fetch-depth: 1
-          persist-credentials: false
-          sparse-checkout: |
-            build.env
-            rclone.conf
-          sparse-checkout-cone-mode: false
-
-      - name: ⚙️ Load Drive destination
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-
-          wanted = {"RCLONE_REMOTE_NAME", "RCLONE_UPLOAD_DIR"}
-          loaded = {}
-          for raw_line in Path("runtime/build.env").read_text(encoding="utf-8").splitlines():
-              line = raw_line.strip()
-              if not line or line.startswith("#") or "=" not in line:
-                  continue
-              key, value = line.split("=", 1)
-              if key in wanted:
-                  loaded[key] = value.strip()
-
-          missing = wanted - loaded.keys()
-          if missing:
-              raise SystemExit("Missing Drive runtime values: " + ", ".join(sorted(missing)))
-
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-              for key in sorted(wanted):
-                  output.write(f"{key}={loaded[key]}\n")
-
-      - name: 🧰 Install publish tools
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rclone zip
-          rclone version
-
-      - name: 📥 Download all EXE artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: DeadZone-*
-          path: publish/artifacts
-
-      - name: 📥 Checkout pinned EXE version source
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ needs.resolve.outputs.engine_repository }}
-          ref: ${{ needs.resolve.outputs.engine_sha }}
-          token: ${{ secrets.GH_TOKEN }}
-          path: engine-release
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: 🏷️ Resolve EXE version
-        shell: python
-        run: |
-          import os
-          import re
-          from pathlib import Path
-
-          brand = Path("engine-release/core/brand.py").read_text(encoding="utf-8")
-          match = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', brand, re.MULTILINE)
-          if not match:
-              raise SystemExit("Unable to resolve APP_VERSION from DeadZone_EXE")
-          version = match.group(1).strip()
-          if not re.fullmatch(r"[A-Za-z0-9._+-]+", version):
-              raise SystemExit("DeadZone_EXE APP_VERSION is unsafe for publishing")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-              output.write(f"DEADZONE_EXE_VERSION={version}\n")
-
-      - name: 🧩 Normalize platform applications
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          rm -rf publish/platform publish/runtime-apps
-          mkdir -p \
-            publish/platform/Windows \
-            publish/platform/Linux \
-            publish/platform/macOS-arm64 \
-            publish/platform/macOS-x64 \
-            publish/runtime-apps
-
-          install -m 0644 \
-            publish/artifacts/DeadZone-Windows/DeadZone.exe \
-            publish/platform/Windows/DeadZone.exe
-          install -m 0644 \
-            publish/artifacts/DeadZone-Windows/DeadZone.exe \
-            publish/runtime-apps/DeadZone.exe
-
-          install -m 0755 \
-            publish/artifacts/DeadZone-Linux/DeadZone-Linux.AppImage \
-            publish/platform/Linux/DeadZone-Linux.AppImage
-          install -m 0755 \
-            publish/artifacts/DeadZone-Linux/DeadZone-Linux.AppImage \
-            publish/runtime-apps/DeadZone-Linux.AppImage
-
-          for arch in arm64 x64; do
-            source="publish/artifacts/DeadZone-macOS-${arch}/DeadZone-macOS.app.tar.gz"
-            stage="publish/macos-${arch}"
-            mkdir -p "$stage"
-            tar -xzf "$source" -C "$stage"
-            target_name="DeadZone-macOS-${arch}.app"
-            mv "$stage/DeadZone.app" "publish/platform/macOS-${arch}/${target_name}"
-            cp -a "publish/platform/macOS-${arch}/${target_name}" publish/runtime-apps/
-          done
-
-          [[ -f publish/runtime-apps/DeadZone.exe ]]
-          [[ -x publish/runtime-apps/DeadZone-Linux.AppImage ]]
-          [[ -d publish/runtime-apps/DeadZone-macOS-arm64.app ]]
-          [[ -d publish/runtime-apps/DeadZone-macOS-x64.app ]]
-
-      - name: 🗜️ Package platform releases and runtime bundle
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p publish/packages
-
-          package_dir() {
-            local source_dir="$1" filename="$2"
-            (cd "$source_dir" && zip -qry "$GITHUB_WORKSPACE/publish/packages/$filename" .)
-            [[ -s "publish/packages/$filename" ]] || {
-              echo "::error::Release archive was not created: ${filename}"
-              exit 1
-            }
-          }
-
-          package_dir publish/platform/Windows "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Windows-x64.zip"
-          package_dir publish/platform/Linux "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Linux-x64.zip"
-          package_dir publish/platform/macOS-arm64 "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-arm64.zip"
-          package_dir publish/platform/macOS-x64 "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-x64.zip"
-
-          runtime_archive="DeadZone-Runtimes-v${DEADZONE_EXE_VERSION}.zip"
-          package_dir publish/runtime-apps "$runtime_archive"
-          cp "publish/packages/$runtime_archive" publish/DeadZone-Runtimes.zip
-          (cd publish/packages && sha256sum *.zip > SHA256SUMS.txt)
-
-      - name: ☁️ Upload releases to Google Drive
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          install -m 600 runtime/rclone.conf publish/rclone.conf
-          if ! rclone --config=publish/rclone.conf listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
-            echo "::error::Central rclone.conf does not define expected remote"
-            exit 1
-          fi
-
-          remote_dir="${RCLONE_UPLOAD_DIR%/}/Tools/DeadZone_EXE/v${DEADZONE_EXE_VERSION}"
-          current_runtime="${RCLONE_UPLOAD_DIR%/}/Tools/DeadZone_EXE/current/DeadZone-Runtimes.zip"
-          : > publish/links.tsv
-
-          publish_release() {
-            local platform="$1" arch="$2" recommended="$3" filename="$4"
-            local local_file="publish/packages/${filename}"
-            local remote_file="${RCLONE_REMOTE_NAME}:${remote_dir}/${filename}"
-            rclone --config=publish/rclone.conf copyto --retries 3 "$local_file" "$remote_file"
-            local url
-            url="$(rclone --config=publish/rclone.conf link "$remote_file" 2>/dev/null | tail -n1 | tr -d '\r')"
-            [[ "$url" == https://drive.google.com/* ]] || {
-              echo "::error::Google Drive did not return a public HTTPS link for ${filename}"
-              exit 1
-            }
-            printf '%s\t%s\t%s\t%s\t%s\n' "$platform" "$arch" "$recommended" "$filename" "$url" >> publish/links.tsv
-          }
-
-          publish_release "Windows" "x64" "true" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Windows-x64.zip"
-          publish_release "Linux" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Linux-x64.zip"
-          publish_release "macOS" "ARM64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-arm64.zip"
-          publish_release "macOS" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-x64.zip"
-
-          runtime_name="DeadZone-Runtimes-v${DEADZONE_EXE_VERSION}.zip"
-          rclone --config=publish/rclone.conf copyto --retries 3 \
-            "publish/packages/$runtime_name" \
-            "${RCLONE_REMOTE_NAME}:${remote_dir}/${runtime_name}"
-          rclone --config=publish/rclone.conf copyto --retries 3 \
-            publish/DeadZone-Runtimes.zip \
-            "${RCLONE_REMOTE_NAME}:${current_runtime}"
-          rclone --config=publish/rclone.conf copyto --retries 3 \
-            publish/packages/SHA256SUMS.txt \
-            "${RCLONE_REMOTE_NAME}:${remote_dir}/SHA256SUMS.txt"
-
-      - name: 🧾 Build Flash Guide release manifest
-        shell: python
-        run: |
-          import csv
-          import json
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          downloads = []
-          with Path("publish/links.tsv").open(encoding="utf-8", newline="") as source:
-              for platform, arch, recommended, filename, url in csv.reader(source, delimiter="\t"):
-                  downloads.append(
-                      {
-                          "platform": platform,
-                          "arch": arch,
-                          "filename": filename,
-                          "url": url,
-                          "recommended": recommended == "true",
-                      }
-                  )
-
-          if len(downloads) != 4:
-              raise SystemExit(f"Expected four published EXE downloads, found {len(downloads)}")
-
-          payload = {
-              "version": os.environ["DEADZONE_EXE_VERSION"],
-              "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-              "downloads": downloads,
-          }
-          Path("publish/flash-tool.json").write_text(
-              json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-              encoding="utf-8",
-          )
-
-      - name: 🌐 Checkout DeadZone website
-        uses: actions/checkout@v5
-        with:
-          repository: mohammedmezo99/Deadzone
-          ref: main
-          token: ${{ secrets.GH_TOKEN }}
-          path: website
-          fetch-depth: 1
-          persist-credentials: true
-
-      - name: 🔄 Publish links to Flash Guide
-        shell: bash
-        working-directory: website
-        run: |
-          set -Eeuo pipefail
-          install -m 644 "$GITHUB_WORKSPACE/publish/flash-tool.json" src/data/flash-tool.json
-          git config user.name "DeadZone Build Bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add src/data/flash-tool.json
-          if git diff --cached --quiet; then
-            echo "Flash Guide already contains these EXE links."
-            exit 0
-          fi
-          git commit -m "Update Fastboot Flasher v${DEADZONE_EXE_VERSION} downloads"
-          git pull --rebase origin main
-          git push origin HEAD:main
-
-      - name: 📦 Preserve published release manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: DeadZone-EXE-release-v${{ env.DEADZONE_EXE_VERSION }}
-          path: |
-            publish/flash-tool.json
-            publish/packages/SHA256SUMS.txt
-            publish/DeadZone-Runtimes.zip
           if-no-files-found: error
           retention-days: 30
