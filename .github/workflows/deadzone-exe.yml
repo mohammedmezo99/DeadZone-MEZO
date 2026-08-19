@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Windows runtime regression check · DeadZone_EXE 76f18efe · 2026-08-19
+# Windows runtime regression check · DeadZone_EXE 04c1dc6b · 2026-08-19
 
 run-name: 🖥️ DeadZone_exe Windows test · main · ${{ github.run_id }}
 
@@ -226,23 +226,36 @@ jobs:
           $exe = Resolve-Path "dist/DeadZone.exe"
           $localLog = Join-Path (Split-Path $exe) "DeadZone-crash.log"
           $tempLog = Join-Path $env:TEMP "DeadZone-crash.log"
-          Remove-Item $localLog, $tempLog -Force -ErrorAction SilentlyContinue
+          $nativeLog = Join-Path (Split-Path $exe) "DeadZone-native-crash.txt"
+          Remove-Item $localLog, $tempLog, $nativeLog -Force -ErrorAction SilentlyContinue
+          $startedAt = Get-Date
 
           $process = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 8
           $process.Refresh()
 
           if (Test-Path $localLog) {
-            Get-Content $localLog
+            Get-Content $localLog | Tee-Object -FilePath $nativeLog -Append
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
             throw "DeadZone.exe created a startup crash log."
           }
           if (Test-Path $tempLog) {
-            Get-Content $tempLog
+            Get-Content $tempLog | Tee-Object -FilePath $nativeLog -Append
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
             throw "DeadZone.exe created a startup crash log in TEMP."
           }
           if ($process.HasExited) {
+            "DeadZone.exe exit code: $($process.ExitCode)" | Tee-Object -FilePath $nativeLog
+            Start-Sleep -Seconds 2
+            $events = Get-WinEvent -FilterHashtable @{ LogName='Application'; StartTime=$startedAt } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'DeadZone\.exe|Qt6|qfluent|python312' } |
+              Select-Object -First 20 TimeCreated, Id, ProviderName, LevelDisplayName, Message
+            if ($events) {
+              $events | Format-List | Out-String | Tee-Object -FilePath $nativeLog -Append
+              $events | Format-List
+            } else {
+              "No matching Application event was recorded." | Tee-Object -FilePath $nativeLog -Append
+            }
             throw "DeadZone.exe exited during startup with code $($process.ExitCode)."
           }
 
@@ -250,18 +263,32 @@ jobs:
           Write-Host "DeadZone.exe stayed alive for 8 seconds: runtime startup PASS"
 
       - name: 📏 Report package size
+        if: always()
         working-directory: engine
         shell: python
         run: |
           from pathlib import Path
 
+          if not Path("dist").exists():
+              print("dist directory was not created")
+              raise SystemExit(0)
           files = [path for path in Path("dist").rglob("*") if path.is_file()]
           total = sum(path.stat().st_size for path in files)
-          print(f"DeadZone Windows test package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
+          print(f"DeadZone Windows package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
           for path in sorted(files):
               print(f"  {path.relative_to('dist')}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
 
+      - name: 📤 Upload failed Windows diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeadZone-Windows-Failed-Diagnostics
+          path: engine/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: 📤 Upload tested Windows package
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: DeadZone-Windows-Tested
