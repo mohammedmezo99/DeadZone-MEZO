@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Rebuild marker: DeadZone_EXE bundled-ROM runtime · 2026-08-19
+# Rebuild marker: DeadZone_EXE bundled-ROM runtime · c1a60ddf · 2026-08-19
 
 run-name: 🖥️ DeadZone_exe · main · ${{ github.run_id }}
 
@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       engine_repository: ${{ steps.engine.outputs.repository }}
+      engine_sha: ${{ steps.pin.outputs.sha }}
 
     steps:
       - name: 🔐 Validate launcher credential
@@ -74,6 +75,29 @@ jobs:
 
           print(f"DeadZone EXE engine: {repository}")
 
+      - name: 📌 Pin DeadZone_EXE main revision
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.engine.outputs.repository }}
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: engine-pin
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 🔒 Export pinned engine SHA
+        id: pin
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sha="$(git -C engine-pin rev-parse HEAD)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Unable to pin DeadZone_EXE revision"
+            exit 1
+          }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinned DeadZone_EXE: $sha"
+
   build:
     name: 🛠️ ${{ matrix.artifact_name }}
     needs: resolve
@@ -99,11 +123,11 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: 📥 Checkout DeadZone_EXE main
+      - name: 📥 Checkout pinned DeadZone_EXE
         uses: actions/checkout@v5
         with:
           repository: ${{ needs.resolve.outputs.engine_repository }}
-          ref: main
+          ref: ${{ needs.resolve.outputs.engine_sha }}
           token: ${{ secrets.GH_TOKEN }}
           path: engine
           fetch-depth: 1
@@ -211,7 +235,6 @@ jobs:
         run: |
           import os
           import shutil
-          import sys
           import time
           import urllib.error
           import urllib.request
@@ -436,11 +459,11 @@ jobs:
           pattern: DeadZone-*
           path: publish/artifacts
 
-      - name: 📥 Checkout EXE version source
+      - name: 📥 Checkout pinned EXE version source
         uses: actions/checkout@v5
         with:
           repository: ${{ needs.resolve.outputs.engine_repository }}
-          ref: main
+          ref: ${{ needs.resolve.outputs.engine_sha }}
           token: ${{ secrets.GH_TOKEN }}
           path: engine-release
           fetch-depth: 1
