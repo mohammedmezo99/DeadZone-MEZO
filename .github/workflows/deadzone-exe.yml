@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Windows runtime regression check · DeadZone_EXE 2d25db14 · 2026-08-19
+# Windows runtime regression check · DeadZone_EXE 1bc51ff4 · 2026-08-19
 
 run-name: 🖥️ DeadZone_exe Windows test · main · ${{ github.run_id }}
 
