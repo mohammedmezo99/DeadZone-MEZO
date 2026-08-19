@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   resolve:
@@ -27,6 +28,20 @@ jobs:
       engine_sha: ${{ steps.pin.outputs.sha }}
 
     steps:
+      - name: 🛰️ Publish validation run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          curl --fail-with-body -sS -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "{\"state\":\"pending\",\"context\":\"DeadZone/Windows EXE\",\"description\":\"Windows EXE build and launch is running\",\"target_url\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
+
       - name: 🔐 Validate launcher credential
         shell: bash
         env:
@@ -295,3 +310,24 @@ jobs:
           path: engine/dist/
           if-no-files-found: error
           retention-days: 30
+
+      - name: 📡 Publish final validation status
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_STATUS: ${{ job.status }}
+        run: |
+          $state = if ($env:RUN_STATUS -eq 'success') { 'success' } else { 'failure' }
+          $description = if ($state -eq 'success') { 'Windows EXE built and stayed running' } else { 'Windows EXE validation failed' }
+          $body = @{
+            state = $state
+            context = 'DeadZone/Windows EXE'
+            description = $description
+            target_url = "${env:GITHUB_SERVER_URL}/${env:GITHUB_REPOSITORY}/actions/runs/${env:GITHUB_RUN_ID}"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post \
+            -Uri "https://api.github.com/repos/${env:GITHUB_REPOSITORY}/statuses/${env:GITHUB_SHA}" \
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } \
+            -ContentType 'application/json' \
+            -Body $body
