@@ -1,0 +1,19 @@
+name: DeadZone EXE validation kick
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  kick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Windows EXE validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deadzone-exe.yml --repo "$GITHUB_REPOSITORY" --ref main
