@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Rebuild marker: DeadZone_EXE main c709b07c · 2026-08-18
+# Rebuild marker: DeadZone_EXE bundled-ROM runtime · 2026-08-19
 
 run-name: 🖥️ DeadZone_exe · main · ${{ github.run_id }}
 
@@ -203,25 +203,7 @@ jobs:
           iconutil -c icns "$iconset_path" -o "$icns_path"
           rm -rf "$iconset_path"
 
-      - name: 🏗️ Build DeadZone executable
-        working-directory: engine
-        run: python build.py --clean --onefile
-
-      - name: 🐧 Verify Linux executable linkage
-        if: runner.os == 'Linux'
-        working-directory: engine
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          [[ -x dist/DeadZone ]] || chmod +x dist/DeadZone
-          linkage="$(ldd dist/DeadZone || true)"
-          printf '%s\n' "$linkage"
-          if grep -Fq "not found" <<<"$linkage"; then
-            echo "::error::Linux executable has unresolved shared libraries"
-            exit 1
-          fi
-
-      - name: ⚡ Bundle minimal Android Fastboot runtime
+      - name: ⚡ Prepare embedded Android Fastboot runtime
         working-directory: engine
         shell: python
         env:
@@ -262,25 +244,19 @@ jobs:
               raise SystemExit("Unable to download Android platform-tools")
 
           fastboot_name = "fastboot.exe" if os.name == "nt" else "fastboot"
-          required = [
-              f"platform-tools/{fastboot_name}",
-              "platform-tools/NOTICE.txt",
-              "platform-tools/source.properties",
-          ]
+          required = [f"platform-tools/{fastboot_name}"]
+          optional = []
           if os.name == "nt":
-              required.append("platform-tools/AdbWinApi.dll")
+              optional.extend(
+                  [
+                      "platform-tools/AdbWinApi.dll",
+                      "platform-tools/AdbWinUsbApi.dll",
+                  ]
+              )
 
-          if sys.platform == "darwin":
-              app_bundle = Path("dist/DeadZone.app")
-              if not app_bundle.is_dir():
-                  raise SystemExit("DeadZone.app was not produced")
-              Path("dist/DeadZone").unlink(missing_ok=True)
-              destination = app_bundle / "Contents/MacOS/platform-tools"
-          else:
-              destination = Path("dist/platform-tools")
-
+          destination = Path("platform-tools")
           shutil.rmtree(destination, ignore_errors=True)
-          destination.mkdir(parents=True, exist_ok=True)
+          destination.mkdir(parents=True)
 
           with zipfile.ZipFile(archive_path) as archive:
               available = set(archive.namelist())
@@ -289,41 +265,84 @@ jobs:
                   raise SystemExit(
                       "Android platform-tools archive is missing: " + ", ".join(missing)
                   )
-              for member in required:
+              for member in [*required, *(m for m in optional if m in available)]:
                   target = destination / Path(member).name
                   with archive.open(member) as source, target.open("wb") as output:
                       shutil.copyfileobj(source, output)
 
           fastboot = destination / fastboot_name
-          if not fastboot.is_file():
-              raise SystemExit(f"Fastboot is missing after extraction: {fastboot}")
+          if os.name != "nt":
+              fastboot.chmod(0o755)
           archive_path.unlink(missing_ok=True)
+          print(f"Embedded Fastboot runtime ready: {fastboot}")
 
-      - name: 🔧 Set Fastboot permissions
-        if: runner.os != 'Windows'
+      - name: 🏗️ Build DeadZone executable
+        working-directory: engine
+        run: python build.py --clean --onefile
+
+      - name: 🐧 Verify Linux executable linkage
+        if: runner.os == 'Linux'
         working-directory: engine
         shell: bash
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            chmod +x dist/DeadZone.app/Contents/MacOS/platform-tools/fastboot
-          else
-            chmod +x dist/platform-tools/fastboot
+          set -Eeuo pipefail
+          chmod +x dist/DeadZone
+          linkage="$(ldd dist/DeadZone || true)"
+          printf '%s\n' "$linkage"
+          if grep -Fq "not found" <<<"$linkage"; then
+            echo "::error::Linux executable has unresolved shared libraries"
+            exit 1
           fi
 
-      - name: ⚙️ Copy runtime config
+      - name: 🐧 Package Linux AppImage
+        if: runner.os == 'Linux'
         working-directory: engine
-        shell: python
+        shell: bash
         run: |
-          import shutil
-          import sys
-          from pathlib import Path
+          set -Eeuo pipefail
+          appdir="DeadZone.AppDir"
+          rm -rf "$appdir"
+          mkdir -p "$appdir/usr/bin"
+          install -m 0755 dist/DeadZone "$appdir/usr/bin/DeadZone"
+          install -m 0644 assets/icons/deadzone_logo_256.png "$appdir/deadzone.png"
+          cat > "$appdir/DeadZone.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=DeadZone Fastboot Flasher
+          Exec=DeadZone
+          Icon=deadzone
+          Categories=Utility;
+          Terminal=false
+          EOF
+          cat > "$appdir/AppRun" <<'EOF'
+          #!/bin/sh
+          APPDIR="$(dirname "$(readlink -f "$0")")"
+          exec "$APPDIR/usr/bin/DeadZone" "$@"
+          EOF
+          chmod +x "$appdir/AppRun"
+          curl --fail --location --retry 3 \
+            -o appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
+            "$appdir" dist/DeadZone-Linux.AppImage
+          chmod +x dist/DeadZone-Linux.AppImage
+          rm -f dist/DeadZone appimagetool-x86_64.AppImage
+          rm -rf "$appdir"
 
-          config = Path("config.json")
-          if config.is_file():
-              destination = Path("dist/config.json")
-              if sys.platform == "darwin":
-                  destination = Path("dist/DeadZone.app/Contents/MacOS/config.json")
-              shutil.copy2(config, destination)
+      - name: 🍎 Archive macOS app for artifact transport
+        if: runner.os == 'macOS'
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ -d dist/DeadZone.app ]] || {
+            echo "::error::DeadZone.app was not produced"
+            exit 1
+          }
+          tar -czf dist/DeadZone-macOS.app.tar.gz -C dist DeadZone.app
+          rm -rf dist/DeadZone.app
+          rm -f dist/DeadZone
 
       - name: 📏 Report package size
         working-directory: engine
@@ -444,34 +463,70 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"DEADZONE_EXE_VERSION={version}\n")
 
-      - name: 🗜️ Package platform releases
+      - name: 🧩 Normalize platform applications
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf publish/platform publish/runtime-apps
+          mkdir -p \
+            publish/platform/Windows \
+            publish/platform/Linux \
+            publish/platform/macOS-arm64 \
+            publish/platform/macOS-x64 \
+            publish/runtime-apps
+
+          install -m 0644 \
+            publish/artifacts/DeadZone-Windows/DeadZone.exe \
+            publish/platform/Windows/DeadZone.exe
+          install -m 0644 \
+            publish/artifacts/DeadZone-Windows/DeadZone.exe \
+            publish/runtime-apps/DeadZone.exe
+
+          install -m 0755 \
+            publish/artifacts/DeadZone-Linux/DeadZone-Linux.AppImage \
+            publish/platform/Linux/DeadZone-Linux.AppImage
+          install -m 0755 \
+            publish/artifacts/DeadZone-Linux/DeadZone-Linux.AppImage \
+            publish/runtime-apps/DeadZone-Linux.AppImage
+
+          for arch in arm64 x64; do
+            source="publish/artifacts/DeadZone-macOS-${arch}/DeadZone-macOS.app.tar.gz"
+            stage="publish/macos-${arch}"
+            mkdir -p "$stage"
+            tar -xzf "$source" -C "$stage"
+            target_name="DeadZone-macOS-${arch}.app"
+            mv "$stage/DeadZone.app" "publish/platform/macOS-${arch}/${target_name}"
+            cp -a "publish/platform/macOS-${arch}/${target_name}" publish/runtime-apps/
+          done
+
+          [[ -f publish/runtime-apps/DeadZone.exe ]]
+          [[ -x publish/runtime-apps/DeadZone-Linux.AppImage ]]
+          [[ -d publish/runtime-apps/DeadZone-macOS-arm64.app ]]
+          [[ -d publish/runtime-apps/DeadZone-macOS-x64.app ]]
+
+      - name: 🗜️ Package platform releases and runtime bundle
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p publish/packages
-          expected=(DeadZone-Windows DeadZone-Linux DeadZone-macOS-arm64 DeadZone-macOS-x64)
-          for artifact in "${expected[@]}"; do
-            source_dir="publish/artifacts/${artifact}"
-            [[ -d "$source_dir" ]] || {
-              echo "::error::Missing downloaded artifact: ${artifact}"
-              exit 1
-            }
-            if [[ "$artifact" != "DeadZone-Windows" ]]; then
-              find "$source_dir" -type f \( -name DeadZone -o -name fastboot \) -exec chmod +x {} +
-            fi
-            case "$artifact" in
-              DeadZone-Windows) suffix="Windows-x64" ;;
-              DeadZone-Linux) suffix="Linux-x64" ;;
-              DeadZone-macOS-arm64) suffix="macOS-arm64" ;;
-              DeadZone-macOS-x64) suffix="macOS-x64" ;;
-            esac
-            filename="DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-${suffix}.zip"
+
+          package_dir() {
+            local source_dir="$1" filename="$2"
             (cd "$source_dir" && zip -qry "$GITHUB_WORKSPACE/publish/packages/$filename" .)
             [[ -s "publish/packages/$filename" ]] || {
               echo "::error::Release archive was not created: ${filename}"
               exit 1
             }
-          done
+          }
+
+          package_dir publish/platform/Windows "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Windows-x64.zip"
+          package_dir publish/platform/Linux "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Linux-x64.zip"
+          package_dir publish/platform/macOS-arm64 "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-arm64.zip"
+          package_dir publish/platform/macOS-x64 "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-x64.zip"
+
+          runtime_archive="DeadZone-Runtimes-v${DEADZONE_EXE_VERSION}.zip"
+          package_dir publish/runtime-apps "$runtime_archive"
+          cp "publish/packages/$runtime_archive" publish/DeadZone-Runtimes.zip
           (cd publish/packages && sha256sum *.zip > SHA256SUMS.txt)
 
       - name: ☁️ Upload releases to Google Drive
@@ -485,6 +540,7 @@ jobs:
           fi
 
           remote_dir="${RCLONE_UPLOAD_DIR%/}/Tools/DeadZone_EXE/v${DEADZONE_EXE_VERSION}"
+          current_runtime="${RCLONE_UPLOAD_DIR%/}/Tools/DeadZone_EXE/current/DeadZone-Runtimes.zip"
           : > publish/links.tsv
 
           publish_release() {
@@ -505,7 +561,17 @@ jobs:
           publish_release "Linux" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-Linux-x64.zip"
           publish_release "macOS" "ARM64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-arm64.zip"
           publish_release "macOS" "x64" "false" "DeadZone-Fastboot-Flasher-v${DEADZONE_EXE_VERSION}-macOS-x64.zip"
-          rclone --config=publish/rclone.conf copyto --retries 3 publish/packages/SHA256SUMS.txt "${RCLONE_REMOTE_NAME}:${remote_dir}/SHA256SUMS.txt"
+
+          runtime_name="DeadZone-Runtimes-v${DEADZONE_EXE_VERSION}.zip"
+          rclone --config=publish/rclone.conf copyto --retries 3 \
+            "publish/packages/$runtime_name" \
+            "${RCLONE_REMOTE_NAME}:${remote_dir}/${runtime_name}"
+          rclone --config=publish/rclone.conf copyto --retries 3 \
+            publish/DeadZone-Runtimes.zip \
+            "${RCLONE_REMOTE_NAME}:${current_runtime}"
+          rclone --config=publish/rclone.conf copyto --retries 3 \
+            publish/packages/SHA256SUMS.txt \
+            "${RCLONE_REMOTE_NAME}:${remote_dir}/SHA256SUMS.txt"
 
       - name: 🧾 Build Flash Guide release manifest
         shell: python
@@ -576,5 +642,6 @@ jobs:
           path: |
             publish/flash-tool.json
             publish/packages/SHA256SUMS.txt
+            publish/DeadZone-Runtimes.zip
           if-no-files-found: error
           retention-days: 30
