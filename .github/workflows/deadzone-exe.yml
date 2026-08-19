@@ -1,5 +1,5 @@
 name: DeadZone_exe
-# Windows runtime regression check · external Fastboot · 2026-08-19
+# Windows runtime regression check · DeadZone_EXE ff7ca997 · 2026-08-19
 
 run-name: 🖥️ DeadZone_exe Windows test · main · ${{ github.run_id }}
 
