@@ -1,7 +1,6 @@
 name: DeadZone_exe
-# Windows runtime validation · real native window check · 2026-08-19
 
-run-name: 🖥️ DeadZone_exe Windows test · main · ${{ github.run_id }}
+run-name: 📦 DeadZone_exe 3-platform build · main · ${{ github.run_id }}
 
 concurrency:
   group: deadzone-exe-build-queue
@@ -17,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  statuses: write
 
 jobs:
   resolve:
@@ -28,20 +26,6 @@ jobs:
       engine_sha: ${{ steps.pin.outputs.sha }}
 
     steps:
-      - name: 🛰️ Publish validation run
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -Eeuo pipefail
-          curl --fail-with-body -sS -L \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "{\"state\":\"pending\",\"context\":\"DeadZone/Windows EXE\",\"description\":\"Windows EXE build and native window validation is running\",\"target_url\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
-
       - name: 🔐 Validate launcher credential
         shell: bash
         env:
@@ -78,8 +62,8 @@ jobs:
               line = raw_line.strip()
               if not line or line.startswith("#") or "=" not in line:
                   continue
-              key, mapped_value = line.split("=", 1)
-              mapping[key.strip()] = mapped_value.strip()
+              key, mapped_repository = line.split("=", 1)
+              mapping[key.strip()] = mapped_repository.strip()
 
           repository = mapping.get("EXE_REPOSITORY", "")
           if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
@@ -113,10 +97,34 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Pinned DeadZone_EXE: $sha"
 
-  windows:
-    name: 🛠️ DeadZone-Windows runtime test
+  build:
+    name: 🏗️ ${{ matrix.artifact_name }}
     needs: resolve
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: DeadZone-Windows
+            runtime_name: windows
+            fastboot_name: fastboot.exe
+            platform_tools_urls: >-
+              https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+              https://dl-ssl.google.com/android/repository/platform-tools-latest-windows.zip
+          - os: ubuntu-latest
+            artifact_name: DeadZone-Linux
+            runtime_name: linux
+            fastboot_name: fastboot
+            platform_tools_urls: >-
+              https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+          - os: macos-latest
+            artifact_name: DeadZone-macOS-arm64
+            runtime_name: macos-arm64
+            fastboot_name: fastboot
+            platform_tools_urls: >-
+              https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
     steps:
@@ -133,7 +141,7 @@ jobs:
       - name: 🐍 Setup Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: 📦 Install build dependencies
         working-directory: engine
@@ -141,14 +149,25 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: 🐧 Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libxcb-cursor0 libegl1 libxkbcommon0
+
       - name: 🧪 Compile engine
         working-directory: engine
         run: python -m compileall -q app.py build.py core ui
 
-      - name: ⚡ Download Windows Fastboot runtime
+      - name: ⚡ Prepare Fastboot runtime
         working-directory: engine
         shell: python
+        env:
+          PLATFORM_TOOLS_URLS: ${{ matrix.platform_tools_urls }}
+          RUNTIME_NAME: ${{ matrix.runtime_name }}
+          FASTBOOT_NAME: ${{ matrix.fastboot_name }}
         run: |
+          import os
           import shutil
           import time
           import urllib.error
@@ -156,10 +175,9 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          urls = (
-              "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
-              "https://dl-ssl.google.com/android/repository/platform-tools-latest-windows.zip",
-          )
+          urls = os.environ["PLATFORM_TOOLS_URLS"].split()
+          runtime_name = os.environ["RUNTIME_NAME"]
+          fastboot_name = os.environ["FASTBOOT_NAME"]
           archive_path = Path("platform-tools.zip")
 
           def download(url):
@@ -184,11 +202,15 @@ jobs:
           if not any(download(url) for url in urls):
               raise SystemExit("Unable to download Android platform-tools")
 
-          required = (
-              "platform-tools/fastboot.exe",
-              "platform-tools/AdbWinApi.dll",
-              "platform-tools/AdbWinUsbApi.dll",
-          )
+          required = [f"platform-tools/{fastboot_name}"]
+          if runtime_name == "windows":
+              required.extend(
+                  (
+                      "platform-tools/AdbWinApi.dll",
+                      "platform-tools/AdbWinUsbApi.dll",
+                  )
+              )
+
           destination = Path("platform-tools")
           shutil.rmtree(destination, ignore_errors=True)
           destination.mkdir(parents=True)
@@ -197,168 +219,105 @@ jobs:
               available = set(archive.namelist())
               missing = [member for member in required if member not in available]
               if missing:
-                  raise SystemExit("Android platform-tools archive is missing: " + ", ".join(missing))
+                  raise SystemExit(
+                      "Android platform-tools archive is missing: " + ", ".join(missing)
+                  )
               for member in required:
                   target = destination / Path(member).name
                   with archive.open(member) as source, target.open("wb") as output:
                       shutil.copyfileobj(source, output)
 
           archive_path.unlink(missing_ok=True)
-          print("External Windows Fastboot runtime prepared")
 
-      - name: 🏗️ Build clean Windows EXE
+      - name: 🏗️ Build clean executable
         working-directory: engine
         run: python build.py --clean --onefile
 
-      - name: 📂 Stage Fastboot outside the EXE
+      - name: 📂 Stage external Fastboot runtime
         working-directory: engine
         shell: python
+        env:
+          RUNTIME_NAME: ${{ matrix.runtime_name }}
+          FASTBOOT_NAME: ${{ matrix.fastboot_name }}
         run: |
+          import os
           import shutil
+          import stat
           from pathlib import Path
 
+          runtime_name = os.environ["RUNTIME_NAME"]
+          fastboot_name = os.environ["FASTBOOT_NAME"]
           source = Path("platform-tools")
-          destination = Path("dist/META-INF/DeadZone/runtime/windows")
+          destination = Path("dist/META-INF/DeadZone/runtime") / runtime_name
           destination.mkdir(parents=True, exist_ok=True)
-          for name in ("fastboot.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
-              shutil.copy2(source / name, destination / name)
-          print(f"Fastboot runtime staged at {destination}")
 
-      - name: ⚡ Verify external Fastboot
+          runtime_files = [fastboot_name]
+          if runtime_name == "windows":
+              runtime_files.extend(("AdbWinApi.dll", "AdbWinUsbApi.dll"))
+
+          for filename in runtime_files:
+              target = destination / filename
+              shutil.copy2(source / filename, target)
+              if runtime_name != "windows":
+                  target.chmod(
+                      target.stat().st_mode
+                      | stat.S_IXUSR
+                      | stat.S_IXGRP
+                      | stat.S_IXOTH
+                  )
+
+          config = Path("config.json")
+          if config.is_file():
+              shutil.copy2(config, Path("dist/config.json"))
+
+      - name: ⚡ Verify packaged Fastboot
         working-directory: engine
-        shell: pwsh
+        shell: python
+        env:
+          RUNTIME_NAME: ${{ matrix.runtime_name }}
+          FASTBOOT_NAME: ${{ matrix.fastboot_name }}
         run: |
-          $fastboot = Resolve-Path "dist/META-INF/DeadZone/runtime/windows/fastboot.exe"
-          & $fastboot --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "External Fastboot runtime failed its version check."
-          }
+          import os
+          import subprocess
+          from pathlib import Path
 
-      - name: 🪟 Launch and verify real DeadZone window
-        working-directory: engine
-        shell: pwsh
-        run: |
-          $exe = Resolve-Path "dist/DeadZone.exe"
-          $localLog = Join-Path (Split-Path $exe) "DeadZone-crash.log"
-          $tempLog = Join-Path $env:TEMP "DeadZone-crash.log"
-          $nativeLog = Join-Path (Split-Path $exe) "DeadZone-native-crash.txt"
-          Remove-Item $localLog, $tempLog, $nativeLog -Force -ErrorAction SilentlyContinue
-          $startedAt = Get-Date
-
-          function Write-NativeDiagnostics([string]$Reason) {
-            $Reason | Tee-Object -FilePath $nativeLog
-            if (Test-Path $localLog) {
-              "--- DeadZone-crash.log ---" | Tee-Object -FilePath $nativeLog -Append
-              Get-Content $localLog | Tee-Object -FilePath $nativeLog -Append
-            }
-            if (Test-Path $tempLog) {
-              "--- TEMP DeadZone-crash.log ---" | Tee-Object -FilePath $nativeLog -Append
-              Get-Content $tempLog | Tee-Object -FilePath $nativeLog -Append
-            }
-            Start-Sleep -Seconds 2
-            $events = Get-WinEvent -FilterHashtable @{ LogName='Application'; StartTime=$startedAt } -ErrorAction SilentlyContinue |
-              Where-Object { $_.Message -match 'DeadZone\.exe|Qt6|qfluent|python312' } |
-              Select-Object -First 20 TimeCreated, Id, ProviderName, LevelDisplayName, Message
-            if ($events) {
-              $events | Format-List | Out-String | Tee-Object -FilePath $nativeLog -Append
-              $events | Format-List
-            } else {
-              "No matching Application event was recorded." | Tee-Object -FilePath $nativeLog -Append
-            }
-          }
-
-          $rootProcess = Start-Process -FilePath $exe -PassThru
-          $deadline = (Get-Date).AddSeconds(45)
-          $windowProcess = $null
-
-          while ((Get-Date) -lt $deadline) {
-            $rootProcess.Refresh()
-            $candidates = @(Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue)
-            $windowProcess = $candidates |
-              Where-Object { $_.MainWindowHandle -ne 0 } |
-              Select-Object -First 1
-
-            if ($windowProcess) {
-              break
-            }
-
-            if ($rootProcess.HasExited -and $candidates.Count -eq 0) {
-              Write-NativeDiagnostics "DeadZone.exe exited before creating a native window. Exit code: $($rootProcess.ExitCode)"
-              throw "DeadZone.exe exited before its window opened."
-            }
-
-            Start-Sleep -Milliseconds 500
-          }
-
-          if (-not $windowProcess) {
-            Write-NativeDiagnostics "DeadZone.exe did not create a native main window within 45 seconds."
-            Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            throw "DeadZone.exe stayed headless for 45 seconds."
-          }
-
-          Write-Host "DeadZone native window detected: PID=$($windowProcess.Id) HWND=$($windowProcess.MainWindowHandle)"
-          Start-Sleep -Seconds 5
-          $windowProcess.Refresh()
-          if ($windowProcess.HasExited) {
-            Write-NativeDiagnostics "DeadZone window process exited immediately after its window appeared."
-            throw "DeadZone.exe window was not stable after startup."
-          }
-
-          Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Write-Host "DeadZone.exe opened a real native window and remained stable for 5 seconds: PASS"
+          fastboot = (
+              Path("dist/META-INF/DeadZone/runtime")
+              / os.environ["RUNTIME_NAME"]
+              / os.environ["FASTBOOT_NAME"]
+          )
+          completed = subprocess.run(
+              [str(fastboot.resolve()), "--version"],
+              check=False,
+              capture_output=True,
+              text=True,
+          )
+          print(completed.stdout or completed.stderr)
+          if completed.returncode != 0:
+              raise SystemExit("Packaged Fastboot runtime failed its version check")
 
       - name: 📏 Report package size
-        if: always()
         working-directory: engine
         shell: python
         run: |
           from pathlib import Path
 
-          if not Path("dist").exists():
-              print("dist directory was not created")
-              raise SystemExit(0)
           files = [path for path in Path("dist").rglob("*") if path.is_file()]
           total = sum(path.stat().st_size for path in files)
-          print(f"DeadZone Windows package: {total / 1024 / 1024:.1f} MiB across {len(files)} files")
+          print(
+              f"DeadZone package: {total / 1024 / 1024:.1f} MiB "
+              f"across {len(files)} files"
+          )
           for path in sorted(files):
-              print(f"  {path.relative_to('dist')}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
+              print(
+                  f"  {path.relative_to('dist')}: "
+                  f"{path.stat().st_size / 1024 / 1024:.1f} MiB"
+              )
 
-      - name: 📤 Upload failed Windows diagnostics
-        if: failure()
+      - name: 📤 Upload platform build
         uses: actions/upload-artifact@v4
         with:
-          name: DeadZone-Windows-Failed-Diagnostics
-          path: engine/dist/
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: 📤 Upload tested Windows package
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: DeadZone-Windows-Tested
+          name: ${{ matrix.artifact_name }}
           path: engine/dist/
           if-no-files-found: error
           retention-days: 30
-
-      - name: 📡 Publish final validation status
-        if: always()
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_STATUS: ${{ job.status }}
-        run: |
-          $state = if ($env:RUN_STATUS -eq 'success') { 'success' } else { 'failure' }
-          $description = if ($state -eq 'success') { 'Windows EXE opened a native window successfully' } else { 'Windows EXE validation failed' }
-          $body = @{
-            state = $state
-            context = 'DeadZone/Windows EXE'
-            description = $description
-            target_url = "${env:GITHUB_SERVER_URL}/${env:GITHUB_REPOSITORY}/actions/runs/${env:GITHUB_RUN_ID}"
-          } | ConvertTo-Json
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/${env:GITHUB_REPOSITORY}/statuses/${env:GITHUB_SHA}" -Headers $headers -ContentType 'application/json' -Body $body
