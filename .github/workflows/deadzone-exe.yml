@@ -296,7 +296,93 @@ jobs:
           if completed.returncode != 0:
               raise SystemExit("Packaged Fastboot runtime failed its version check")
 
+      - name: 🪟 Launch and verify real DeadZone window
+        if: runner.os == 'Windows'
+        working-directory: engine
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/DeadZone.exe"
+          $localLog = Join-Path (Split-Path $exe) "DeadZone-crash.log"
+          $tempLog = Join-Path $env:TEMP "DeadZone-crash.log"
+          $nativeLog = Join-Path (Split-Path $exe) "DeadZone-native-crash.txt"
+          Remove-Item $localLog, $tempLog, $nativeLog -Force -ErrorAction SilentlyContinue
+          $startedAt = Get-Date
+
+          function Write-NativeDiagnostics([string]$Reason) {
+            $Reason | Tee-Object -FilePath $nativeLog
+            if (Test-Path $localLog) {
+              "--- DeadZone-crash.log ---" | Tee-Object -FilePath $nativeLog -Append
+              Get-Content $localLog | Tee-Object -FilePath $nativeLog -Append
+            }
+            if (Test-Path $tempLog) {
+              "--- TEMP DeadZone-crash.log ---" | Tee-Object -FilePath $nativeLog -Append
+              Get-Content $tempLog | Tee-Object -FilePath $nativeLog -Append
+            }
+            Start-Sleep -Seconds 2
+            $events = Get-WinEvent -FilterHashtable @{ LogName='Application'; StartTime=$startedAt } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'DeadZone\.exe|Qt6|qfluent|python312' } |
+              Select-Object -First 20 TimeCreated, Id, ProviderName, LevelDisplayName, Message
+            if ($events) {
+              $events | Format-List | Out-String | Tee-Object -FilePath $nativeLog -Append
+              $events | Format-List
+            } else {
+              "No matching Application event was recorded." | Tee-Object -FilePath $nativeLog -Append
+            }
+          }
+
+          $rootProcess = Start-Process -FilePath $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(45)
+          $windowProcess = $null
+
+          while ((Get-Date) -lt $deadline) {
+            $rootProcess.Refresh()
+            $candidates = @(Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue)
+            $windowProcess = $candidates |
+              Where-Object { $_.MainWindowHandle -ne 0 } |
+              Select-Object -First 1
+
+            if ($windowProcess) {
+              break
+            }
+
+            if ($rootProcess.HasExited -and $candidates.Count -eq 0) {
+              Write-NativeDiagnostics "DeadZone.exe exited before creating a native window. Exit code: $($rootProcess.ExitCode)"
+              throw "DeadZone.exe exited before its window opened."
+            }
+
+            Start-Sleep -Milliseconds 500
+          }
+
+          if (-not $windowProcess) {
+            Write-NativeDiagnostics "DeadZone.exe did not create a native main window within 45 seconds."
+            Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            throw "DeadZone.exe stayed headless for 45 seconds."
+          }
+
+          Write-Host "DeadZone native window detected: PID=$($windowProcess.Id) HWND=$($windowProcess.MainWindowHandle)"
+          Start-Sleep -Seconds 5
+          $windowProcess.Refresh()
+          if ($windowProcess.HasExited) {
+            Write-NativeDiagnostics "DeadZone window process exited immediately after its window appeared."
+            throw "DeadZone.exe window was not stable after startup."
+          }
+
+          Get-Process -Name "DeadZone" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "DeadZone.exe opened a real native window and remained stable for 5 seconds: PASS"
+
+      - name: 📤 Upload Windows startup diagnostics
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeadZone-Windows-Failed-Diagnostics
+          path: |
+            engine/dist/DeadZone-native-crash.txt
+            engine/dist/DeadZone-crash.log
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: 📏 Report package size
+        if: success()
         working-directory: engine
         shell: python
         run: |
@@ -315,6 +401,7 @@ jobs:
               )
 
       - name: 📤 Upload platform build
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
