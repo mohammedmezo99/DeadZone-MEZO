@@ -270,6 +270,25 @@ jobs:
           if config.is_file():
               shutil.copy2(config, Path("dist/config.json"))
 
+      - name: 🍎 Prune duplicate macOS launcher
+        if: runner.os == 'macOS'
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          app_binary="dist/DeadZone.app/Contents/MacOS/DeadZone"
+          standalone="dist/DeadZone"
+          [[ -f "$app_binary" ]] || {
+            echo "::error::Missing macOS app launcher: $app_binary"
+            exit 1
+          }
+          [[ -f "$standalone" ]] || {
+            echo "::error::Missing duplicate macOS standalone launcher: $standalone"
+            exit 1
+          }
+          rm -f "$standalone"
+          echo "Removed duplicate macOS standalone launcher; DeadZone.app remains packaged."
+
       - name: ⚡ Verify packaged Fastboot
         working-directory: engine
         shell: python
