@@ -6,6 +6,7 @@ concurrency:
   group: deadzone-exe-build-queue
   cancel-in-progress: false
 
+# Pushes to this launcher intentionally start a fresh three-platform EXE build.
 on:
   workflow_dispatch:
   push:
