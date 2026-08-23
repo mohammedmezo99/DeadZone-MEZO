@@ -1,6 +1,6 @@
 name: DeadZone_exe
 
-run-name: 📦 DeadZone_exe 3-platform build · main · ${{ github.run_id }}
+run-name: 📦 DeadZone_exe 3-platform build · ${{ github.ref_name }} · ${{ github.run_id }}
 
 concurrency:
   group: deadzone-exe-build-queue
