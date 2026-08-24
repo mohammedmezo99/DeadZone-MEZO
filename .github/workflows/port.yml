@@ -32,6 +32,11 @@ on:
         description: Signed DeadZone build-event endpoint
         required: true
         type: string
+      engine_key:
+        description: Which Port engine to build (xiaomi/coloros/oxygenos/realmeui). Defaults to xiaomi for backward compatibility.
+        required: false
+        type: string
+        default: xiaomi
 
 permissions:
   contents: read
@@ -103,6 +108,55 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: 🧭 Resolve Port engine
+        id: engine
+        shell: bash
+        env:
+          ENGINE_KEY: ${{ inputs.engine_key }}
+        run: |
+          set -Eeuo pipefail
+          # engine_key -> { runtime key passed to DeadZone-File's load-build.sh,
+          # expected engine repository, final-zip glob, mirror OS-folder mode }.
+          # NOTE: DeadZone-File (private) must define a "port_<X>" runtime entry
+          # for coloros/oxygenos/realmeui alongside the existing "port" (xiaomi)
+          # entry -- see DEADZONE_ECOSYSTEM_FINAL_REPORT.md.
+          case "$ENGINE_KEY" in
+            xiaomi)
+              runtime_key=port
+              expected_repo=mohammedmezo99/DeadZone-xiaomi_Port
+              zip_glob='DeadZone_Port_*.zip'
+              os_folder_mode=xiaomi
+              ;;
+            coloros)
+              runtime_key=port_coloros
+              expected_repo=mohammedmezo99/DeadZone-ColorOS_Port
+              zip_glob='DeadZone_ColorOSPort_*.zip'
+              os_folder_mode=fixed:ColorOS
+              ;;
+            oxygenos)
+              runtime_key=port_oxygenos
+              expected_repo=mohammedmezo99/DeadZone-OxygenOS_Port
+              zip_glob='DeadZone_OxygenOSPort_*.zip'
+              os_folder_mode=fixed:OxygenOS
+              ;;
+            realmeui)
+              runtime_key=port_realmeui
+              expected_repo=mohammedmezo99/DeadZone-RealmeUI_Port
+              zip_glob='DeadZone_RealmeUIPort_*.zip'
+              os_folder_mode=fixed:RealmeUI
+              ;;
+            *)
+              echo "::error::Unknown Port engine_key: $ENGINE_KEY" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "runtime_key=$runtime_key"
+            echo "expected_repo=$expected_repo"
+            echo "zip_glob=$zip_glob"
+            echo "os_folder_mode=$os_folder_mode"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 🔐 Load DeadZone central runtime
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -118,10 +172,12 @@ jobs:
         shell: bash
         env:
           DEADZONE_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: bash runtime/load-build.sh port
+        run: bash runtime/load-build.sh "${{ steps.engine.outputs.runtime_key }}"
 
       - name: 🛡️ Validate Port engine runtime
         shell: bash
+        env:
+          EXPECTED_ENGINE_REPOSITORY: ${{ steps.engine.outputs.expected_repo }}
         run: |
           set -Eeuo pipefail
           required=(
@@ -137,8 +193,8 @@ jobs:
               exit 1
             }
           done
-          [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-xiaomi_Port" ]] || {
-            echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
+          [[ "$DEADZONE_ENGINE_REPOSITORY" == "$EXPECTED_ENGINE_REPOSITORY" ]] || {
+            echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY (expected $EXPECTED_ENGINE_REPOSITORY)" >&2
             exit 1
           }
           echo "::add-mask::$BUILD_PROGRESS_SECRET"
@@ -238,6 +294,7 @@ jobs:
         working-directory: toolbuild
         env:
           DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+          ZIP_GLOB: ${{ steps.engine.outputs.zip_glob }}
         run: |
           set -Eeuo pipefail
           python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
@@ -248,7 +305,7 @@ jobs:
           set -e
           printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name "$ZIP_GLOB" -print 2>/dev/null)
           if (( ${#final_zips[@]} != 1 )); then
             echo "::error::Expected exactly one preserved final Port ZIP; found ${#final_zips[@]}"
             exit 1
@@ -281,6 +338,8 @@ jobs:
         env:
           SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+          ZIP_GLOB: ${{ steps.engine.outputs.zip_glob }}
+          OS_FOLDER_MODE: ${{ steps.engine.outputs.os_folder_mode }}
         run: |
           set -Eeuo pipefail
           set -a
@@ -296,7 +355,7 @@ jobs:
             fi
           done
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name "$ZIP_GLOB" -print 2>/dev/null)
           (( ${#final_zips[@]} == 1 )) || {
             echo "::error::Final Port ZIP is unavailable for mirror upload"
             exit 1
@@ -308,7 +367,9 @@ jobs:
           port_state="$PWD/build/.port_state/port/ddevice"
           codename="$(tr '[:lower:]' '[:upper:]' < "$stock_state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
           rom_version="$(tr -d '\r\n' < "$port_state/base_rom_code.txt")"
-          if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
+          if [[ "$OS_FOLDER_MODE" == fixed:* ]]; then
+            os_folder="${OS_FOLDER_MODE#fixed:}"
+          elif [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
             os_folder="${BASH_REMATCH[1]}"
           elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
             os_folder="MIUI${BASH_REMATCH[1]}"

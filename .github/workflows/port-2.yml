@@ -33,6 +33,11 @@ on:
         description: Signed DeadZone build-event endpoint
         required: true
         type: string
+      engine_key:
+        description: Which Port engine to build (xiaomi/coloros/oxygenos/realmeui). Defaults to xiaomi for backward compatibility.
+        required: false
+        type: string
+        default: xiaomi
 
 permissions:
   contents: read
@@ -48,4 +53,5 @@ jobs:
       builder_id: ${{ inputs.builder_id }}
       request_id: ${{ inputs.request_id }}
       callback_url: ${{ inputs.callback_url }}
+      engine_key: ${{ inputs.engine_key }}
     secrets: inherit
