@@ -1,8 +1,8 @@
-name: MEZO-Port
-run-name: 🔂 MEZO-Port · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
+name: MEZO-Port OxygenOS
+run-name: 🔂 MEZO-Port OxygenOS · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
 concurrency:
-  group: mezo-port-build-queue
+  group: mezo-port-oxygenos-build-queue
   queue: max
 
 on:
@@ -38,13 +38,13 @@ permissions:
 
 jobs:
   build:
-    name: 🔂 Build DeadZone Port
+    name: 🔂 Build DeadZone OxygenOS Port
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       DEADZONE_REQUEST_ID: ${{ inputs.request_id }}
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-      DEADZONE_PROJECT: port
+      DEADZONE_PROJECT: port_oxygenos
       DEADZONE_CONTROLLED_BUILD: "1"
       DEADZONE_STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
       DEADZONE_PORT_ROM_URL: ${{ inputs.port_rom_url }}
@@ -66,7 +66,7 @@ jobs:
           from urllib.parse import urlparse
 
           request_id = os.environ["REQUEST_ID"].strip()
-          if not re.fullmatch(r"port_[A-Za-z0-9]{8,80}", request_id):
+          if not re.fullmatch(r"port_oxygenos_[A-Za-z0-9]{8,80}", request_id):
               raise SystemExit("Invalid DeadZone Port request ID")
 
           for name in ("STOCK_ROM_URL", "PORT_ROM_URL", "CALLBACK_URL"):
@@ -118,7 +118,7 @@ jobs:
         shell: bash
         env:
           DEADZONE_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: bash runtime/load-build.sh port
+        run: bash runtime/load-build.sh port_oxygenos
 
       - name: 🛡️ Validate Port engine runtime
         shell: bash
@@ -137,7 +137,7 @@ jobs:
               exit 1
             }
           done
-          [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-xiaomi_Port" ]] || {
+          [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-OxygenOS_Port" ]] || {
             echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
             exit 1
           }
@@ -248,7 +248,7 @@ jobs:
           set -e
           printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_OxygenOSPort_*.zip' -print 2>/dev/null)
           if (( ${#final_zips[@]} != 1 )); then
             echo "::error::Expected exactly one preserved final Port ZIP; found ${#final_zips[@]}"
             exit 1
@@ -296,7 +296,7 @@ jobs:
             fi
           done
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_OxygenOSPort_*.zip' -print 2>/dev/null)
           (( ${#final_zips[@]} == 1 )) || {
             echo "::error::Final Port ZIP is unavailable for mirror upload"
             exit 1
@@ -308,14 +308,7 @@ jobs:
           port_state="$PWD/build/.port_state/port/ddevice"
           codename="$(tr '[:lower:]' '[:upper:]' < "$stock_state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
           rom_version="$(tr -d '\r\n' < "$port_state/base_rom_code.txt")"
-          if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
-            os_folder="${BASH_REMATCH[1]}"
-          elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
-            os_folder="MIUI${BASH_REMATCH[1]}"
-          else
-            echo "::error::Unable to derive mirror OS folder from Port ROM version: ${rom_version}"
-            exit 1
-          fi
+          os_folder="OxygenOS"
 
           google_status="${DEADZONE_GOOGLE_UPLOAD_STATUS:-1}"
           drive_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
@@ -408,7 +401,7 @@ jobs:
             exit 1
           }
           python3 runtime/report_build_event.py failed \
-            --project port \
+            --project port_oxygenos \
             --message "Port ROM build failed."
 
       - name: ⛔ Report cancelled Port build
@@ -428,5 +421,5 @@ jobs:
             exit 1
           }
           python3 runtime/report_build_event.py cancelled \
-            --project port \
+            --project port_oxygenos \
             --message "Port ROM build cancelled."

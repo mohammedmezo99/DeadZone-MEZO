@@ -1,35 +1,32 @@
-name: MEZO-Port
-run-name: 🔂 MEZO-Port · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
+name: MEZO-Ninja
+
+run-name: 🛠️ MEZO-Ninja · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
 concurrency:
-  group: mezo-port-build-queue
+  group: mezo-ninja-build-queue
   queue: max
 
 on:
   workflow_dispatch:
     inputs:
-      stock_rom_url:
-        description: Stock ROM HTTPS URL
-        required: true
-        type: string
-      port_rom_url:
-        description: Port ROM HTTPS URL
+      input_url:
+        description: 📥 ROM download URL
         required: true
         type: string
       builder_name:
-        description: Telegram builder name
+        description: 👤 Builder name
         required: false
         type: string
       builder_id:
-        description: Telegram builder ID
-        required: true
+        description: 💬 Telegram user ID
+        required: false
         type: string
       request_id:
-        description: DeadZone Port build request ID
+        description: 🆔 DeadZone controlled build request ID
         required: true
         type: string
       callback_url:
-        description: Signed DeadZone build-event endpoint
+        description: 🔗 Signed DeadZone build-event endpoint
         required: true
         type: string
 
@@ -38,26 +35,24 @@ permissions:
 
 jobs:
   build:
-    name: 🔂 Build DeadZone Port
+    name: 🛠️ Build ROM
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       DEADZONE_REQUEST_ID: ${{ inputs.request_id }}
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-      DEADZONE_PROJECT: port
+      DEADZONE_PROJECT: ninja
       DEADZONE_CONTROLLED_BUILD: "1"
-      DEADZONE_STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
-      DEADZONE_PORT_ROM_URL: ${{ inputs.port_rom_url }}
+      DEADZONE_INPUT_URL: ${{ inputs.input_url }}
       DEADZONE_BUILDER_NAME: ${{ inputs.builder_name }}
       DEADZONE_BUILDER_ID: ${{ inputs.builder_id }}
       DEADZONE_SOURCE_REPOSITORY: ${{ github.repository }}
 
     steps:
-      - name: 🔐 Validate Port request
+      - name: 🧾 Validate controlled request
         shell: python
         env:
-          STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
-          PORT_ROM_URL: ${{ inputs.port_rom_url }}
+          INPUT_URL: ${{ inputs.input_url }}
           REQUEST_ID: ${{ inputs.request_id }}
           CALLBACK_URL: ${{ inputs.callback_url }}
         run: |
@@ -66,86 +61,104 @@ jobs:
           from urllib.parse import urlparse
 
           request_id = os.environ["REQUEST_ID"].strip()
-          if not re.fullmatch(r"port_[A-Za-z0-9]{8,80}", request_id):
-              raise SystemExit("Invalid DeadZone Port request ID")
+          if not re.fullmatch(r"ninja_[A-Za-z0-9]{8,80}", request_id):
+              raise SystemExit("Invalid DeadZone request ID")
 
-          for name in ("STOCK_ROM_URL", "PORT_ROM_URL", "CALLBACK_URL"):
+          for name in ("INPUT_URL", "CALLBACK_URL"):
               value = os.environ[name].strip()
               parsed = urlparse(value)
-              if (
-                  parsed.scheme != "https"
-                  or not parsed.hostname
-                  or parsed.username
-                  or parsed.password
-                  or len(value) > 2048
-              ):
+              if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                   raise SystemExit(f"{name} must be a safe HTTPS URL")
 
-      - name: 🔐 Validate publishing credentials
-        shell: bash
+      - name: 🔐 Validate launcher credentials
         env:
-          DEADZONE_RUNTIME_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
-          set -Eeuo pipefail
-          required=(DEADZONE_RUNTIME_TOKEN SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          set -euo pipefail
+          required=(GH_TOKEN SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
           for variable_name in "${required[@]}"; do
             if [[ -z "${!variable_name:-}" ]]; then
-              echo "::error::Missing required publishing secret: ${variable_name}"
+              echo "::error::Missing required repository secret: ${variable_name}"
               exit 1
             fi
           done
 
       - name: 📥 Checkout DeadZone launcher
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: 🔐 Load DeadZone central runtime
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: 📥 Checkout private runtime
+        uses: actions/checkout@v4
         with:
           repository: mohammedmezo99/DeadZone-File
-          token: ${{ secrets.GH_TOKEN }}
           ref: main
+          token: ${{ secrets.GH_TOKEN }}
           path: runtime
           fetch-depth: 1
           persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+            report_build_event.py
+            upload.env
+            upload-mirrors.sh
+            publish-website-release.py
+          sparse-checkout-cone-mode: false
 
-      - name: 🔑 Import Port runtime
-        id: central
-        shell: bash
+      - name: ⚙️ Load central runtime
+        id: runtime
         env:
-          DEADZONE_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: bash runtime/load-build.sh port
-
-      - name: 🛡️ Validate Port engine runtime
-        shell: bash
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: "1"
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
+          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py upload.env upload-mirrors.sh publish-website-release.py; do
+            if [[ ! -s "runtime/${runtime_file}" ]]; then
+              echo "::error::Central runtime file is missing or empty: ${runtime_file}"
+              exit 1
+            fi
+          done
+          chmod 700 runtime/load-build.sh runtime/upload-mirrors.sh
+          python3 -m py_compile runtime/report_build_event.py runtime/publish-website-release.py
+          runtime/load-build.sh ninja
+
+      - name: ✅ Validate loaded runtime
+        env:
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+        run: |
+          set -euo pipefail
           required=(
+            ENGINE_REPOSITORY
             DEADZONE_ENGINE_REPOSITORY
-            PRIVATE_REPO_TOKEN
+            BUILD_PROGRESS_SECRET
             RCLONE_REMOTE_NAME
             RCLONE_UPLOAD_DIR
-            BUILD_PROGRESS_SECRET
           )
           for variable_name in "${required[@]}"; do
-            [[ -n "${!variable_name:-}" ]] || {
-              echo "Missing runtime value: $variable_name" >&2
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Central runtime value is missing: ${variable_name}"
               exit 1
-            }
+            fi
           done
-          [[ "$DEADZONE_ENGINE_REPOSITORY" == "mohammedmezo99/DeadZone-xiaomi_Port" ]] || {
-            echo "Unexpected Port engine: $DEADZONE_ENGINE_REPOSITORY" >&2
+          if [[ "$ENGINE_REPOSITORY" != "mohammedmezo99/DeadZone-xiaomi_Ninja" ]]; then
+            echo "::error::Unexpected Ninja engine: $ENGINE_REPOSITORY"
             exit 1
-          }
-          echo "::add-mask::$BUILD_PROGRESS_SECRET"
-          echo "DEADZONE_EVENT_SECRET=$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+          fi
+          if [[ "$ENGINE_REPOSITORY" != "$DEADZONE_ENGINE_REPOSITORY" ]]; then
+            echo "::error::Runtime engine output does not match the loaded project map"
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
 
-      - name: ⚡ Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+      - name: 💾 Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
         with:
           build-mount-path: ${{ github.workspace }}/toolbuild
           swap-size-mb: 1024
@@ -153,54 +166,89 @@ jobs:
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
-          remove-docker-images: "true"
 
-      - name: 📥 Checkout private Port engine
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: 🧹 Clean unused runner packages
+        run: |
+          set -euo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
+
+      - name: 📦 Checkout private Ninja engine
+        uses: actions/checkout@v4
         with:
-          repository: ${{ steps.central.outputs.engine_repository }}
-          token: ${{ env.PRIVATE_REPO_TOKEN }}
+          repository: ${{ steps.runtime.outputs.engine_repository }}
           ref: main
+          token: ${{ secrets.GH_TOKEN }}
           path: toolbuild
-          fetch-depth: 1
           lfs: true
+          fetch-depth: 1
           persist-credentials: false
 
-      - name: 📡 Report queued Port build
+      - name: 🧭 Validate Ninja engine layout
         working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
-          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          set -euo pipefail
+          required_engine_files=(
+            build.sh
+            functions.sh
+            notify.py
+            packROM.sh
+            uploadROM.sh
+          )
+          for engine_file in "${required_engine_files[@]}"; do
+            if [[ ! -s "$engine_file" ]]; then
+              echo "::error::Ninja engine file is missing or empty: ${engine_file}"
+              exit 1
+            fi
+          done
+          python3 -m py_compile notify.py
+          bash -n uploadROM.sh
+          bash -n packROM.sh
+
+      - name: 📣 Start live tracking
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 notify.py start "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "ninja" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
       - name: 🕒 Set Cairo timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
-      - name: ☕ Prepare Java 17
-        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+      - name: ☕ Install OpenJDK
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧰 Install Port dependencies
+      - name: 🧰 Install engine dependencies
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
-          sudo bash -Ee -o pipefail setup.sh
+          sudo apt-get update
+          sudo apt-get purge -y device-tree-compiler || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq rclone python-is-python3 wget python3 python3-pip \
+            lz4 xz-utils zlib1g-dev gcc g++ libc6 libstdc++6 \
+            busybox zip unzip p7zip-full zipalign zstd bc erofs-utils \
+            android-sdk-libsparse-utils xmlstarlet aapt rsync openssh-client curl
+          sudo pip3 install --break-system-packages --no-cache-dir ConfigObj lz4 zstandard setuptools || \
+            sudo pip3 install --no-cache-dir ConfigObj lz4 zstandard setuptools
 
-      - name: 🔧 Give Port tools permission
+      - name: 🔓 Grant builder permissions
         working-directory: toolbuild
-        run: sudo chmod 777 -R *
+        run: chmod -R u+rwX,go+rX .
 
-      - name: ☁️ Install central rclone config
-        shell: bash
+      - name: ☁️ Install central Rclone configuration
         working-directory: toolbuild
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
           target_file="$PWD/rclone.conf"
           [[ -s "$source_file" ]] || {
-            echo "::error::Central rclone config missing or empty: $source_file"
+            echo "::error::Central rclone.conf is missing or empty"
             exit 1
           }
           install -m 600 "$source_file" "$target_file"
@@ -210,54 +258,41 @@ jobs:
           fi
           rclone version
 
-      - name: 🔂 Build Stock + Port ROM
+      - name: 🚀 Build ROM
         working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
           set -Eeuo pipefail
-          sudo -E bash build.sh \
-            "$DEADZONE_STOCK_ROM_URL" \
-            "$DEADZONE_PORT_ROM_URL" \
-            "$DEADZONE_SOURCE_REPOSITORY" \
-            port \
-            "$DEADZONE_BUILDER_NAME" \
-            "$DEADZONE_BUILDER_ID" \
-            2>&1 | tee build_action.log
+          sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "ninja" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log
 
-      - name: 📦 Pack Port ROM
+      - name: 📦 Pack Super
         working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
           set -Eeuo pipefail
-          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "ninja" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
           sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
 
       - name: 🗜️ Package and upload Google Drive
         working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
           set -Eeuo pipefail
-          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "ninja" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
           set +e
-          sudo -E bash bin/port/uploadROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
           google_status=${PIPESTATUS[0]}
           set -e
           printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Ninja_*.zip' -print 2>/dev/null)
           if (( ${#final_zips[@]} != 1 )); then
-            echo "::error::Expected exactly one preserved final Port ZIP; found ${#final_zips[@]}"
+            echo "::error::Expected exactly one preserved final Ninja ZIP; found ${#final_zips[@]}"
             exit 1
           fi
 
           final_zip="${final_zips[0]}"
           final_name="$(basename "$final_zip")"
           python3 -m zipfile -t "$final_zip" >/dev/null || {
-            echo "::error::Final Port ZIP failed archive integrity validation: ${final_name}"
+            echo "::error::Final Ninja ZIP failed archive integrity validation: ${final_name}"
             exit 1
           }
 
@@ -296,31 +331,29 @@ jobs:
             fi
           done
 
-          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Port_*.zip' -print 2>/dev/null)
+          mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Ninja_*.zip' -print 2>/dev/null)
           (( ${#final_zips[@]} == 1 )) || {
-            echo "::error::Final Port ZIP is unavailable for mirror upload"
+            echo "::error::Final Ninja ZIP is unavailable for mirror upload"
             exit 1
           }
           final_zip="${final_zips[0]}"
           final_name="$(basename "$final_zip")"
 
-          stock_state="$PWD/build/.port_state/stock/ddevice"
-          port_state="$PWD/build/.port_state/port/ddevice"
-          codename="$(tr '[:lower:]' '[:upper:]' < "$stock_state/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
-          rom_version="$(tr -d '\r\n' < "$port_state/base_rom_code.txt")"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
           if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
             os_folder="${BASH_REMATCH[1]}"
           elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
             os_folder="MIUI${BASH_REMATCH[1]}"
           else
-            echo "::error::Unable to derive mirror OS folder from Port ROM version: ${rom_version}"
+            echo "::error::Unable to derive mirror OS folder from ROM version: ${rom_version}"
             exit 1
           fi
 
           google_status="${DEADZONE_GOOGLE_UPLOAD_STATUS:-1}"
           drive_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
           if (( google_status == 0 )) && [[ -z "$drive_url" ]]; then
-            drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/Port/${codename}/${os_folder}/${final_name}"
+            drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/Ninja/${codename}/${os_folder}/${final_name}"
             drive_url="$(rclone --config="$PWD/rclone.conf" link "$drive_remote" 2>/dev/null | tail -n1 | tr -d '\r' || true)"
             if [[ -n "$drive_url" ]]; then
               printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\nDEADZONE_RESULT_URL=%s\n' "$drive_url" "$drive_url" >> "$GITHUB_ENV"
@@ -336,7 +369,7 @@ jobs:
 
           set +e
           bash "$GITHUB_WORKSPACE/runtime/upload-mirrors.sh" \
-            "Port" "$codename" "$os_folder" "$final_zip" "$final_name" \
+            "Ninja" "$codename" "$os_folder" "$final_zip" "$final_name" \
             2>&1 | tee -a build_action.log
           mirror_status=${PIPESTATUS[0]}
           set -e
@@ -349,16 +382,14 @@ jobs:
             echo "::warning::Secondary mirrors failed, but Google Drive upload succeeded"
           fi
 
-      - name: ✅ Report successful Port build
+      - name: ✅ Send success notification
         if: success()
         working-directory: toolbuild
-        env:
-          DEADZONE_EVENT_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
         run: |
           set -euo pipefail
-          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
+          python3 notify.py success "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "ninja" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
-      - name: 🌐 Publish Port release to website
+      - name: 🌐 Publish release to website
         if: success()
         continue-on-error: true
         working-directory: toolbuild
@@ -370,28 +401,21 @@ jobs:
             echo "::warning::Website release skipped: final ZIP name is unavailable"
             exit 0
           }
-          stock_state="$PWD/build/.port_state/stock/ddevice"
-          port_state="$PWD/build/.port_state/port/ddevice"
+          state_dir="$PWD/bin/ddevice"
           python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
             --request-id "$DEADZONE_REQUEST_ID" \
             --edition-version "$(tr -d '\r\n' < Version)" \
-            --codename "$(tr -d '\r\n' < "$stock_state/device_f.txt")" \
-            --rom-version "$(tr -d '\r\n' < "$port_state/base_rom_code.txt")" \
-            --android-version "$(tr -d '\r\n' < "$port_state/androidver.txt")" \
-            --region "$(tr -d '\r\n' < "$stock_state/device_type.txt")" \
+            --codename "$(tr -d '\r\n' < "$state_dir/device_f.txt")" \
+            --rom-version "$(tr -d '\r\n' < "$state_dir/base_rom_code.txt")" \
+            --android-version "$(tr -d '\r\n' < "$state_dir/androidver.txt")" \
+            --region "$(tr -d '\r\n' < "$state_dir/device_type.txt")" \
             --filename "$DEADZONE_RESULT_NAME" \
             --artifact-path "$PWD/out/$DEADZONE_RESULT_NAME" \
             --google-drive-url "${DEADZONE_GOOGLE_DRIVE_URL:-}" \
             --sourceforge-url "${DEADZONE_SOURCEFORGE_URL:-}" \
             --pixeldrain-url "${DEADZONE_PIXELDRAIN_URL:-}"
 
-      - name: 🧹 Cleanup Port workspace
-        if: always()
-        run: |
-          sudo rm -rf toolbuild/out toolbuild/build
-          rm -f toolbuild/rclone.conf
-
-      - name: ❌ Report failed Port build
+      - name: ❌ Send failure notification
         if: failure()
         shell: bash
         run: |
@@ -404,14 +428,14 @@ jobs:
             export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
           fi
           [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
-            echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            echo '::error::Terminal Ninja event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
           python3 runtime/report_build_event.py failed \
-            --project port \
-            --message "Port ROM build failed."
+            --project ninja \
+            --message "DeadZone Ninja ROM build failed."
 
-      - name: ⛔ Report cancelled Port build
+      - name: ⛔ Send cancellation notification
         if: cancelled()
         shell: bash
         run: |
@@ -424,9 +448,16 @@ jobs:
             export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
           fi
           [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
-            echo '::error::Terminal Port event cannot be signed because the central event secret is unavailable.'
+            echo '::error::Terminal Ninja event cannot be signed because the central event secret is unavailable.'
             exit 1
           }
           python3 runtime/report_build_event.py cancelled \
-            --project port \
-            --message "Port ROM build cancelled."
+            --project ninja \
+            --message "DeadZone Ninja ROM build cancelled."
+
+      - name: 🧽 Cleanup Ninja workspace
+        if: always()
+        run: |
+          sudo rm -rf toolbuild/out toolbuild/build
+          rm -rf runtime
+          rm -f toolbuild/rclone.conf
