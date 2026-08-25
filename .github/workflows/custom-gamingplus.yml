@@ -2,10 +2,6 @@ name: MEZO-GamingPlus
 
 run-name: 🛠️ MEZO-GamingPlus · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
-concurrency:
-  group: mezo-gamingplus-build-queue
-  queue: max
-
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +25,31 @@ on:
         description: 🔗 Signed DeadZone build-event endpoint
         required: true
         type: string
+
+  workflow_call:
+    inputs:
+      input_url:
+        required: true
+        type: string
+      builder_name:
+        required: false
+        type: string
+      builder_id:
+        required: false
+        type: string
+      request_id:
+        required: true
+        type: string
+      callback_url:
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+      SOURCEFORGE_SSH_PRIVATE_KEY:
+        required: true
+      PIXELDRAIN_API_KEY:
+        required: true
 
 permissions:
   contents: read
