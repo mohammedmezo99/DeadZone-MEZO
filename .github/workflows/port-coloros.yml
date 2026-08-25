@@ -33,6 +33,27 @@ on:
         required: true
         type: string
 
+  workflow_call:
+    inputs:
+      stock_rom_url:
+        required: true
+        type: string
+      port_rom_url:
+        required: true
+        type: string
+      builder_name:
+        required: false
+        type: string
+      builder_id:
+        required: true
+        type: string
+      request_id:
+        required: true
+        type: string
+      callback_url:
+        required: true
+        type: string
+
 permissions:
   contents: read
 
