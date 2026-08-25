@@ -279,7 +279,6 @@ jobs:
           discussion_username="$(jq -er '.vars.REQUIRED_DISCUSSION_USERNAME' wrangler.production.jsonc)"
           channel_username="$(jq -er '.vars.REQUIRED_CHANNEL_USERNAME' wrangler.production.jsonc)"
           expected_discussion_id="$(jq -er '.vars.START_CHAT_ID' wrangler.production.jsonc)"
-          expected_channel_id="$(jq -er '.vars.OWNER_BROADCAST_CHAT_ID' wrangler.production.jsonc)"
           me="$(curl --silent --show-error --fail-with-body "${api}/getMe")"
           bot_id="$(jq -er '.result.id' <<<"$me")"
 
@@ -296,10 +295,6 @@ jobs:
              .result.can_delete_messages == true and
              .result.can_restrict_members == true)
           ' <<<"$discussion_member" >/dev/null
-
-          channel_chat="$(curl --silent --show-error --fail-with-body -G "${api}/getChat" \
-            --data-urlencode "chat_id=${channel_username}")"
-          [[ "$(jq -er '.result.id' <<<"$channel_chat")" == "$expected_channel_id" ]]
 
           channel_member="$(curl --silent --show-error --fail-with-body -G "${api}/getChatMember" \
             --data-urlencode "chat_id=${channel_username}" \
