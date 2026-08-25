@@ -2,10 +2,6 @@ name: MEZO-GamingPlus
 
 run-name: 🛠️ MEZO-GamingPlus · ${{ inputs.request_id }} · ${{ inputs.builder_name || github.actor }}
 
-concurrency:
-  group: mezo-gamingplus-build-queue
-  queue: max
-
 on:
   workflow_dispatch:
     inputs:
@@ -47,6 +43,13 @@ on:
       callback_url:
         required: true
         type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+      SOURCEFORGE_SSH_PRIVATE_KEY:
+        required: true
+      PIXELDRAIN_API_KEY:
+        required: true
 
 permissions:
   contents: read
