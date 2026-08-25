@@ -284,25 +284,35 @@ jobs:
 
           discussion_chat="$(curl --silent --show-error --fail-with-body -G "${api}/getChat" \
             --data-urlencode "chat_id=${discussion_username}")"
-          [[ "$(jq -er '.result.id' <<<"$discussion_chat")" == "$expected_discussion_id" ]]
+          actual_discussion_id="$(jq -er '.result.id' <<<"$discussion_chat")"
+          if [[ "$actual_discussion_id" != "$expected_discussion_id" ]]; then
+            echo "::error::DeadZoneDiscussion ID mismatch: expected ${expected_discussion_id}, got ${actual_discussion_id}."
+            exit 1
+          fi
 
           discussion_member="$(curl --silent --show-error --fail-with-body -G "${api}/getChatMember" \
             --data-urlencode "chat_id=${discussion_username}" \
             --data-urlencode "user_id=${bot_id}")"
-          jq -e '
+          if ! jq -e '
             .result.status == "creator" or
             (.result.status == "administrator" and
              .result.can_delete_messages == true and
              .result.can_restrict_members == true)
-          ' <<<"$discussion_member" >/dev/null
+          ' <<<"$discussion_member" >/dev/null; then
+            echo "::error::Bot lacks required administrator permissions in @DeadZoneDiscussion."
+            exit 1
+          fi
 
           channel_member="$(curl --silent --show-error --fail-with-body -G "${api}/getChatMember" \
             --data-urlencode "chat_id=${channel_username}" \
             --data-urlencode "user_id=${bot_id}")"
-          jq -e '
+          if ! jq -e '
             .result.status == "creator" or
             (.result.status == "administrator" and .result.can_post_messages == true)
-          ' <<<"$channel_member" >/dev/null
+          ' <<<"$channel_member" >/dev/null; then
+            echo "::error::Bot lacks administrator/post permission in @xDeadZone."
+            exit 1
+          fi
 
       - name: ✅ Deployment summary
         env:
