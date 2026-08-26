@@ -490,12 +490,13 @@ jobs:
           set -Eeuo pipefail
 
           windows_root="$(find bundles/windows -type f -name 'DeadZone.exe' -print -quit | xargs -r dirname)"
-          linux_root="$(find bundles/linux -type f -name 'DeadZone-Linux' -print -quit | xargs -r dirname)"
+          linux_file="$(find bundles/linux -type f \( -name 'DeadZone-Linux' -o -name 'DeadZone' \) -print -quit)"
+          linux_root="$(dirname "$linux_file")"
           mac_root="$(find bundles/macos -type d -name 'DeadZone.app' -print -quit | xargs -r dirname)"
           runtime_root="$(find bundles/windows -type d -path '*/META-INF/DeadZone/runtime' -print -quit)"
 
           [[ -n "$windows_root" && -s "$windows_root/DeadZone.exe" ]] || { echo "::error::Windows DeadZone.exe missing"; exit 1; }
-          [[ -n "$linux_root" && -s "$linux_root/DeadZone-Linux" ]] || { echo "::error::Linux DeadZone-Linux missing"; exit 1; }
+          [[ -n "$linux_file" && -s "$linux_file" ]] || { echo "::error::Linux DeadZone executable missing"; exit 1; }
           [[ -n "$mac_root" && -d "$mac_root/DeadZone.app" ]] || { echo "::error::macOS DeadZone.app missing"; exit 1; }
           [[ -n "$runtime_root" && -s "$runtime_root/windows/fastboot.exe" ]] || { echo "::error::Windows Fastboot runtime missing"; exit 1; }
           [[ -s "$runtime_root/linux/fastboot" ]] || { echo "::error::Linux Fastboot runtime missing"; exit 1; }
@@ -506,7 +507,7 @@ jobs:
             rm -rf "$destination/bin/DeadZone"
             mkdir -p "$destination/bin/DeadZone/runtime"
             install -m 0644 "$windows_root/DeadZone.exe" "$destination/bin/DeadZone/DeadZone.exe"
-            install -m 0755 "$linux_root/DeadZone-Linux" "$destination/bin/DeadZone/DeadZone-Linux"
+            install -m 0755 "$linux_file" "$destination/bin/DeadZone/DeadZone-Linux"
             cp -a "$mac_root/DeadZone.app" "$destination/bin/DeadZone/"
             cp -a "$runtime_root/windows" "$destination/bin/DeadZone/runtime/"
             cp -a "$runtime_root/linux" "$destination/bin/DeadZone/runtime/"
