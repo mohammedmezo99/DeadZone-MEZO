@@ -4,7 +4,7 @@ run-name: 🔂 MEZO-Port 4 · ${{ inputs.request_id }} · ${{ inputs.builder_nam
 
 concurrency:
   group: mezo-port-build-4
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
