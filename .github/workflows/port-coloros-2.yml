@@ -4,7 +4,7 @@ run-name: 🔂 MEZO-Port ColorOS 2 · ${{ inputs.request_id }} · ${{ inputs.bui
 
 concurrency:
   group: mezo-port-coloros-build-2
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
