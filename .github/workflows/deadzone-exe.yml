@@ -499,16 +499,17 @@ jobs:
 
           windows_root="$(find bundles/windows -type f -name 'DeadZone.exe' -print -quit | xargs -r dirname)"
           linux_file="$(find bundles/linux -type f \( -name 'DeadZone-Linux' -o -name 'DeadZone' \) -print -quit)"
-          linux_root="$(dirname "$linux_file")"
           mac_root="$(find bundles/macos -type d -name 'DeadZone.app' -print -quit | xargs -r dirname)"
-          runtime_root="$(find bundles/windows -type d -path '*/META-INF/DeadZone/runtime' -print -quit)"
+          windows_runtime_root="$(find bundles/windows -type d -path '*/META-INF/DeadZone/runtime/windows' -print -quit)"
+          linux_runtime_root="$(find bundles/linux -type d -path '*/META-INF/DeadZone/runtime/linux' -print -quit)"
+          mac_runtime_root="$(find bundles/macos -type d -path '*/META-INF/DeadZone/runtime/macos-arm64' -print -quit)"
 
           [[ -n "$windows_root" && -s "$windows_root/DeadZone.exe" ]] || { echo "::error::Windows DeadZone.exe missing"; exit 1; }
           [[ -n "$linux_file" && -s "$linux_file" ]] || { echo "::error::Linux DeadZone executable missing"; exit 1; }
           [[ -n "$mac_root" && -d "$mac_root/DeadZone.app" ]] || { echo "::error::macOS DeadZone.app missing"; exit 1; }
-          [[ -n "$runtime_root" && -s "$runtime_root/windows/fastboot.exe" ]] || { echo "::error::Windows Fastboot runtime missing"; exit 1; }
-          [[ -s "$runtime_root/linux/fastboot" ]] || { echo "::error::Linux Fastboot runtime missing"; exit 1; }
-          [[ -s "$runtime_root/macos-arm64/fastboot" ]] || { echo "::error::macOS Fastboot runtime missing"; exit 1; }
+          [[ -n "$windows_runtime_root" && -s "$windows_runtime_root/fastboot.exe" ]] || { echo "::error::Windows Fastboot runtime missing"; exit 1; }
+          [[ -n "$linux_runtime_root" && -s "$linux_runtime_root/fastboot" ]] || { echo "::error::Linux Fastboot runtime missing"; exit 1; }
+          [[ -n "$mac_runtime_root" && -s "$mac_runtime_root/fastboot" ]] || { echo "::error::macOS Fastboot runtime missing"; exit 1; }
 
           stage_bundle() {
             local destination="$1"
@@ -517,9 +518,9 @@ jobs:
             install -m 0644 "$windows_root/DeadZone.exe" "$destination/bin/DeadZone/DeadZone.exe"
             install -m 0755 "$linux_file" "$destination/bin/DeadZone/DeadZone-Linux"
             cp -a "$mac_root/DeadZone.app" "$destination/bin/DeadZone/"
-            cp -a "$runtime_root/windows" "$destination/bin/DeadZone/runtime/"
-            cp -a "$runtime_root/linux" "$destination/bin/DeadZone/runtime/"
-            cp -a "$runtime_root/macos-arm64" "$destination/bin/DeadZone/runtime/"
+            cp -a "$windows_runtime_root" "$destination/bin/DeadZone/runtime/windows"
+            cp -a "$linux_runtime_root" "$destination/bin/DeadZone/runtime/linux"
+            cp -a "$mac_runtime_root" "$destination/bin/DeadZone/runtime/macos-arm64"
             chmod 0755 \
               "$destination/bin/DeadZone/DeadZone.app/Contents/MacOS/DeadZone" \
               "$destination/bin/DeadZone/runtime/linux/fastboot" \
