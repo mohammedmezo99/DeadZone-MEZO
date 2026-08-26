@@ -433,7 +433,7 @@ jobs:
     name: 📦 Publish DeadZone bundle to Lite and Port
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
@@ -472,6 +472,10 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: lite
           fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            bin/DeadZone
+          sparse-checkout-cone-mode: true
           persist-credentials: false
 
       - name: 📥 Checkout Port bundle destination
@@ -482,6 +486,10 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: port
           fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            bin/DeadZone
+          sparse-checkout-cone-mode: true
           persist-credentials: false
 
       - name: 🔄 Replace bin/DeadZone bundle in Lite and Port
