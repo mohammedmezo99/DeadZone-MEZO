@@ -497,9 +497,9 @@ jobs:
           [[ -n "$windows_root" && -s "$windows_root/DeadZone.exe" ]] || { echo "::error::Windows DeadZone.exe missing"; exit 1; }
           [[ -n "$linux_root" && -s "$linux_root/DeadZone-Linux" ]] || { echo "::error::Linux DeadZone-Linux missing"; exit 1; }
           [[ -n "$mac_root" && -d "$mac_root/DeadZone.app" ]] || { echo "::error::macOS DeadZone.app missing"; exit 1; }
-          [[ -n "$runtime_root" && -x "$runtime_root/windows/fastboot.exe" ]] || { echo "::error::Windows Fastboot runtime missing"; exit 1; }
-          [[ -x "$runtime_root/linux/fastboot" ]] || { echo "::error::Linux Fastboot runtime missing"; exit 1; }
-          [[ -x "$runtime_root/macos-arm64/fastboot" ]] || { echo "::error::macOS Fastboot runtime missing"; exit 1; }
+          [[ -n "$runtime_root" && -s "$runtime_root/windows/fastboot.exe" ]] || { echo "::error::Windows Fastboot runtime missing"; exit 1; }
+          [[ -s "$runtime_root/linux/fastboot" ]] || { echo "::error::Linux Fastboot runtime missing"; exit 1; }
+          [[ -s "$runtime_root/macos-arm64/fastboot" ]] || { echo "::error::macOS Fastboot runtime missing"; exit 1; }
 
           stage_bundle() {
             local destination="$1"
