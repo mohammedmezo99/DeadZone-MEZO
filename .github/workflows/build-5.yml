@@ -4,7 +4,7 @@ run-name: 🚀 MEZO-Lite 5 · ${{ inputs.request_id }} · ${{ inputs.builder_nam
 
 concurrency:
   group: mezo-lite-build-5
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
