@@ -4,7 +4,7 @@ run-name: 🔂 MEZO-Port OxygenOS 2 · ${{ inputs.request_id }} · ${{ inputs.bu
 
 concurrency:
   group: mezo-port-oxygenos-build-2
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
