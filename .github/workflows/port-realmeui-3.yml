@@ -4,7 +4,7 @@ run-name: 🔂 MEZO-Port RealmeUI 3 · ${{ inputs.request_id }} · ${{ inputs.bu
 
 concurrency:
   group: mezo-port-realmeui-build-3
-  queue: max
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
