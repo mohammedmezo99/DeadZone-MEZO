@@ -1,0 +1,161 @@
+name: DeadZone Fastboot Doctor Build
+
+run-name: 🩺 Fastboot Doctor · \${{ github.ref_name }} · \${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      doctor_ref:
+        description: "Fastboot Doctor branch or tag to build"
+        required: true
+        default: "main"
+        type: string
+  repository_dispatch:
+    types:
+      - fastboot-doctor-build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deadzone-fastboot-doctor-build
+  cancel-in-progress: false
+
+jobs:
+  build-fastboot-doctor:
+    name: 🛠️ Build Fastboot Doctor
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Fastboot Doctor
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-Fastboot-Doctor
+          ref: \${{ inputs.doctor_ref || github.event.client_payload.ref || 'main' }}
+          path: fastboot-doctor
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: fastboot-doctor/requirements.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r fastboot-doctor/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Validate project structure
+        shell: pwsh
+        run: |
+          $required = @(
+            "fastboot-doctor/app.py",
+            "fastboot-doctor/build.py",
+            "fastboot-doctor/requirements.txt",
+            "fastboot-doctor/core",
+            "fastboot-doctor/ui",
+            "fastboot-doctor/assets"
+          )
+
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Required project path is missing: $path"
+            }
+          }
+
+          if (Test-Path "fastboot-doctor/tests") {
+            throw "The tests directory is forbidden in this project."
+          }
+
+      - name: Python syntax check
+        shell: pwsh
+        run: |
+          $files = @("fastboot-doctor/app.py", "fastboot-doctor/build.py")
+          $files += Get-ChildItem -Recurse -Path fastboot-doctor/core, fastboot-doctor/ui -Filter *.py | ForEach-Object { $_.FullName }
+          python -m py_compile $files
+
+      - name: Download official Android Platform Tools
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "platform-tools-windows.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "android-platform-tools"
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $source = Join-Path $extract "platform-tools"
+          $destination = "fastboot-doctor/tools/platform-tools"
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          Copy-Item (Join-Path $source "*") $destination -Recurse -Force
+
+          foreach ($file in @("adb.exe", "fastboot.exe")) {
+            $path = Join-Path $destination $file
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "Missing required Platform Tool: $path"
+            }
+            Get-FileHash $path -Algorithm SHA256
+          }
+
+      - name: Build one-file Windows EXE
+        shell: pwsh
+        run: python fastboot-doctor/build.py --clean --onefile
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $exe = "fastboot-doctor/dist/DeadZoneFastbootDoctor.exe"
+          if (-not (Test-Path $exe -PathType Leaf)) {
+            throw "Build did not produce: $exe"
+          }
+          if ((Get-Item $exe).Length -le 0) {
+            throw "The generated EXE is empty."
+          }
+          Write-Host "EXE generated successfully."
+          Get-Item $exe | Format-List FullName, Length, LastWriteTime
+
+      - name: Verify read-only safety rules
+        shell: pwsh
+        run: |
+          $sourceFiles = Get-ChildItem -Recurse -Path fastboot-doctor -Include *.py,*.yml,*.yaml,*.md
+          $forbiddenPatterns = @(
+            "fastboot\s+flash",
+            "fastboot\s+erase",
+            "fastboot\s+format",
+            "fastboot\s+reboot",
+            "fastboot\s+set_active",
+            "flashing\s+unlock",
+            "oem\s+unlock"
+          )
+
+          foreach ($pattern in $forbiddenPatterns) {
+            $matches = Select-String -Path $sourceFiles.FullName -Pattern $pattern -CaseSensitive:$false
+            if ($matches) {
+              $realCodeMatches = $matches | Where-Object {
+                $_.Line -notmatch "^\s*(#|<!--)" -and $_.Line -notmatch "forbidden|never|do not|not execute"
+              }
+              if ($realCodeMatches) {
+                $realCodeMatches | Format-Table
+                throw "Forbidden destructive command detected: $pattern"
+              }
+            }
+          }
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $artifact = "fastboot-doctor/dist/DeadZoneFastbootDoctor-Windows.zip"
+          Compress-Archive -Path "fastboot-doctor/dist/DeadZoneFastbootDoctor.exe", "fastboot-doctor/dist/tools" -DestinationPath $artifact -Force
+          if (-not (Test-Path $artifact -PathType Leaf)) {
+            throw "Artifact package was not created."
+          }
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeadZoneFastbootDoctor-Windows
+          path: fastboot-doctor/dist/DeadZoneFastbootDoctor-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
