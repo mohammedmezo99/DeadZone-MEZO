@@ -4,6 +4,12 @@ run-name: 🚀 Deploy DeadZone Bot · ${{ github.actor }}
 
 on:
   workflow_dispatch:
+    inputs:
+      clear_pending_updates:
+        description: "Clear stale Telegram updates during this recovery deploy"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -269,7 +275,7 @@ jobs:
             --data-urlencode "url=${WORKER_URL}/telegram/webhook" \
             --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
             --data-urlencode 'allowed_updates=["message","edited_message","callback_query","chat_member","my_chat_member"]' \
-            --data-urlencode 'drop_pending_updates=false')"
+            --data-urlencode "drop_pending_updates=${{ inputs.clear_pending_updates }}")"
           jq -e '.ok == true' <<<"$response" >/dev/null
 
       - name: 🛡️ Verify Telegram membership prerequisites
