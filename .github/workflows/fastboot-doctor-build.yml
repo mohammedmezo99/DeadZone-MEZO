@@ -1,6 +1,6 @@
 name: DeadZone Fastboot Doctor Build
 
-run-name: 🩺 Fastboot Doctor · \${{ github.ref_name }} · \${{ github.actor }}
+run-name: 🩺 Fastboot Doctor · ${{ github.ref_name }} · ${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: mohammedmezo99/DeadZone-Fastboot-Doctor
-          ref: \${{ inputs.doctor_ref || github.event.client_payload.ref || 'main' }}
+          ref: ${{ inputs.doctor_ref || github.event.client_payload.ref || 'main' }}
           path: fastboot-doctor
           fetch-depth: 1
 
