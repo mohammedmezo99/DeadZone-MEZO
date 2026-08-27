@@ -119,30 +119,41 @@ jobs:
       - name: Verify read-only safety rules
         shell: pwsh
         run: |
-          $sourceFiles = Get-ChildItem -Recurse -Path fastboot-doctor -Include *.py,*.yml,*.yaml,*.md
-          $forbiddenPatterns = @(
-            "fastboot\s+flash",
-            "fastboot\s+erase",
-            "fastboot\s+format",
-            "fastboot\s+reboot",
-            "fastboot\s+set_active",
-            "flashing\s+unlock",
-            "oem\s+unlock"
+          # Inspect only command-runner modules. Error explanations and README
+          # files legitimately mention forbidden operations as diagnostic text.
+          $executionFiles = @(
+            "fastboot-doctor/core/process_runner.py",
+            "fastboot-doctor/core/fastboot_runner.py",
+            "fastboot-doctor/core/adb_runner.py"
           )
 
-          foreach ($pattern in $forbiddenPatterns) {
-            $matches = Select-String -Path $sourceFiles.FullName -Pattern $pattern -CaseSensitive:$false
-            if ($matches) {
-              $realCodeMatches = $matches | Where-Object {
-                $_.Line -notmatch "^\s*(#|<!--)" -and $_.Line -notmatch "forbidden|never|do not|not execute"
+          $forbiddenPatterns = @(
+            "(?i)fastboot(?:\.exe)?\s+(flash|erase|format|reboot|set_active)",
+            "(?i)flashing\s+unlock",
+            "(?i)oem\s+unlock"
+          )
+
+          foreach ($file in $executionFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Missing command-runner module: $file"
+            }
+
+            $lines = Get-Content $file
+            foreach ($line in $lines) {
+              if ($line -match "^\s*(#|['\"].*['\"]\s*#)") {
+                continue
               }
-              if ($realCodeMatches) {
-                $realCodeMatches | Format-Table
-                throw "Forbidden destructive command detected: $pattern"
+
+              foreach ($pattern in $forbiddenPatterns) {
+                if ($line -match $pattern) {
+                  throw "Forbidden destructive command found in executable runner code: $file"
+                }
               }
             }
           }
 
+          Write-Host "Read-only command safety check passed."
+          
       - name: Package artifact
         shell: pwsh
         run: |
