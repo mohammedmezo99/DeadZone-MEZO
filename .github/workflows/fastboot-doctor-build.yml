@@ -140,10 +140,6 @@ jobs:
 
             $lines = Get-Content $file
             foreach ($line in $lines) {
-              if ($line -match "^\s*(#|['\"].*['\"]\s*#)") {
-                continue
-              }
-
               foreach ($pattern in $forbiddenPatterns) {
                 if ($line -match $pattern) {
                   throw "Forbidden destructive command found in executable runner code: $file"
