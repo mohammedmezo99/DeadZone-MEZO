@@ -179,6 +179,19 @@ jobs:
           remove-haskell: "true"
           remove-docker-images: "true"
 
+      - name: 💾 Verify build storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mount_path="$GITHUB_WORKSPACE/toolbuild"
+          available_kb="$(df -Pk "$mount_path" | awk 'NR == 2 {print $4}')"
+          required_kb=$((30 * 1024 * 1024))
+          df -h "$mount_path"
+          if (( available_kb < required_kb )); then
+            echo "::error::Insufficient build storage: need at least 30 GiB free before ROM extraction; available $((available_kb / 1024 / 1024)) GiB"
+            exit 1
+          fi
+
       - name: 📥 Checkout private Port engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
