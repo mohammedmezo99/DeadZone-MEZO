@@ -6,7 +6,7 @@ concurrency:
   group: deadzone-exe-build-queue
   cancel-in-progress: false
 
-# A launcher workflow update intentionally starts a fresh three-platform EXE build.
+# Rebuild bundled launchers with sequential super.img.0 RAW-part support.
 on:
   workflow_dispatch:
   push:
