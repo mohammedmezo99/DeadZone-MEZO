@@ -571,7 +571,8 @@ jobs:
               return 0
             fi
             git -C "$directory" commit -m "Update DeadZone launcher bundle"
-            git -C "$directory" -c http.extraheader="AUTHORIZATION: bearer $GH_TOKEN" push origin HEAD:main
+            git -C "$directory" remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${repository}.git"
+            git -C "$directory" push origin HEAD:main
           }
 
           publish_repo lite mohammedmezo99/DeadZone-xiaomi_Lite
