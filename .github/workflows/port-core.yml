@@ -188,6 +188,18 @@ jobs:
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
+
+          chrome_source_pattern='dl.google.com/linux/chrome-stable/deb'
+          while IFS= read -r source_file; do
+            echo "::notice::Disabling unused Chrome APT source: $source_file"
+            sudo mv -- "$source_file" "${source_file}.disabled"
+          done < <(
+            grep -Rls --include='*.list' --include='*.sources' \
+              "$chrome_source_pattern" /etc/apt/sources.list.d 2>/dev/null || true
+          )
+
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get -o Acquire::Retries=3 update
           sudo bash -Ee -o pipefail setup.sh
 
       - name: 🔧 Give Port tools permission
