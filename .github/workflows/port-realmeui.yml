@@ -266,6 +266,11 @@ jobs:
           set -Eeuo pipefail
           python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_STOCK_ROM_URL" port "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID"
 
+          echo "[PERF][BEFORE PACKAGE]"
+          df -h / | tail -1 | awk '{print "  Root:", $4, "available"}'
+          free -h | awk '/^Mem:/ {printf "  Memory: %s total, %s free\n", $2, $7}'
+          nproc | xargs -I{} echo "  CPU cores: {}"
+
           set +e
           sudo -E bash bin/port/uploadROM.sh 2>&1 | tee -a build_action.log
           google_status=${PIPESTATUS[0]}
@@ -280,10 +285,9 @@ jobs:
 
           final_zip="${final_zips[0]}"
           final_name="$(basename "$final_zip")"
-          python3 -m zipfile -t "$final_zip" >/dev/null || {
-            echo "::error::Final Port ZIP failed archive integrity validation: ${final_name}"
-            exit 1
-          }
+
+          # NOTE: Engine's create_zip.py performs streaming integrity validation.
+          # No duplicate workflow-level ZIP validation needed.
 
           final_size_bytes="$(stat -c '%s' "$final_zip")"
           final_size_human="$(python3 - "$final_size_bytes" <<'PY'
@@ -299,6 +303,13 @@ jobs:
           )"
           printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' \
             "$final_size_human" "$final_name" >> "$GITHUB_ENV"
+
+          echo "[PERF] Final ZIP verified by engine streaming validation"
+          echo "[PERF] File size: ${final_size_human}"
+
+          # Post-package cleanup via centralized helper
+          echo "[PERF][POST-PACKAGE] Running cleanup..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" post-package || true
 
       - name: ⬆️ Upload SourceForge and PixelDrain
         working-directory: toolbuild
@@ -405,7 +416,9 @@ jobs:
       - name: 🧹 Cleanup Port workspace
         if: always()
         run: |
-          sudo rm -rf toolbuild/out toolbuild/build
+          set -Eeuo pipefail
+          echo "[CLEANUP] Running final Port workspace cleanup..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" final || true
           rm -f toolbuild/rclone.conf
 
       - name: ❌ Report failed Port build

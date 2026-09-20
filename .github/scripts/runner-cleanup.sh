@@ -5,6 +5,9 @@
 # This script provides centralized cleanup operations for all MEZO workflows.
 # It is ALLOWLIST-driven and safe to use.
 #
+# IMPORTANT: All ROM workflows use working-directory: toolbuild
+# Paths are relative to $GITHUB_WORKSPACE where toolbuild is checked out
+#
 # Usage:
 #   runner-cleanup.sh <mode> [options]
 #
@@ -12,7 +15,7 @@
 #   bootstrap    - Initial runner setup cleanup (pre-build)
 #   pre-build    - Cleanup before ROM build starts
 #   pre-package  - Cleanup before packaging stage
-#   post-package - Cleanup after final ZIP is created
+#   post-package - Cleanup after final ZIP is created (preserves final ZIP)
 #   final        - Final cleanup (always runs, on success/failure/cancel)
 #   light        - Lightweight cleanup for non-ROM workflows
 #
@@ -21,6 +24,12 @@ set -Eeuo pipefail
 # Default to fail-safe behavior
 DRY_RUN="${DRY_RUN:-0}"
 VERBOSE="${VERBOSE:-0}"
+
+# Base paths - always use toolbuild for ROM workflows
+WORKSPACE="${GITHUB_WORKSPACE:-.}"
+TOOLBUILD_DIR="$WORKSPACE/toolbuild"
+ENGINE_OUT_DIR="$TOOLBUILD_DIR/out"
+ENGINE_BUILD_DIR="$TOOLBUILD_DIR/build"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -53,11 +62,13 @@ run_cmd() {
 report_disk() {
     log_info "Disk space report:"
     df -h / | tail -1 | awk -v label="Root" '{printf "  %s: %s available\n", label, $4}'
-    if [[ -d "/workspace" ]]; then
-        df -h /workspace 2>/dev/null | tail -1 | awk -v label="Workspace" '{printf "  %s: %s available\n", label, $4}'
+    if [[ -d "$WORKSPACE" ]]; then
+        df -h "$WORKSPACE" 2>/dev/null | tail -1 | awk -v label="Workspace" '{printf "  %s: %s available\n", label, $4}'
     fi
-    if [[ -d "$GITHUB_WORKSPACE" && "$GITHUB_WORKSPACE" != "/" ]]; then
-        df -h "$GITHUB_WORKSPACE" 2>/dev/null | tail -1 | awk -v label="GitHub Workspace" '{printf "  %s: %s available\n", label, $4}'
+    if [[ -d "$TOOLBUILD_DIR" ]]; then
+        local out_used
+        out_used=$(du -sh "$ENGINE_OUT_DIR" 2>/dev/null | cut -f1 || echo "unknown")
+        log_info "  toolbuild/out: ${out_used}"
     fi
 }
 
@@ -72,37 +83,22 @@ report_memory() {
 cleanup_bootstrap() {
     log_info "Running bootstrap cleanup..."
 
-    # Docker cleanup (if Docker is not used later in this workflow)
-    if ! grep -q "docker" "$GITHUB_WORKSPACE/.github/workflows/"*.yml 2>/dev/null; then
-        log_info "Docker not required, cleaning Docker images..."
-        run_cmd docker image prune --all --force 2>/dev/null || true
-        run_cmd docker builder prune --all --force 2>/dev/null || true
-        run_cmd docker system prune --all --force 2>/dev/null || true
-    fi
+    # Docker cleanup (GitHub Actions runners don't typically use Docker for ROM builds)
+    log_info "Cleaning Docker images..."
+    run_cmd docker image prune --all --force 2>/dev/null || true
+    run_cmd docker builder prune --all --force 2>/dev/null || true
+    run_cmd docker system prune --all --force 2>/dev/null || true
 
-    # Remove large unused SDK components (be careful not to remove what's needed)
-    if [[ -d "/usr/local/lib/android" ]]; then
-        # Check if android SDK is actually needed
-        if ! grep -q "android-sdk" "$GITHUB_WORKSPACE/.github/workflows/"*.yml 2>/dev/null; then
-            log_info "Android SDK not required, cleaning..."
-            run_cmd sudo rm -rf /usr/local/lib/android 2>/dev/null || true
-        fi
-    fi
+    # Remove large unused SDK components
+    log_info "Removing unused SDK components..."
+    run_cmd sudo rm -rf /usr/local/lib/android 2>/dev/null || true
 
-    # Remove unused APT packages
+    # Remove unused APT packages (proven safe for ROM builds)
     log_info "Removing unused system packages..."
     run_cmd sudo apt-get purge -y \
         azure-cli \
-        "ghc*" \
-        "zulu*" \
-        "hhvm*" \
-        "llvm*" \
         firefox \
-        "google*" \
-        "dotnet*" \
         powershell \
-        "mysql*" \
-        "php*" \
         2>/dev/null || true
 
     log_info "Bootstrap cleanup completed"
@@ -115,10 +111,9 @@ cleanup_pre_build() {
     report_disk
     report_memory
 
-    # Ensure workspace is clean
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/temp" 2>/dev/null || true
-    run_cmd rm -rf "$GITHUB_WORKSPACE/out"/* 2>/dev/null || true
-    run_cmd rm -rf "$GITHUB_WORKSPACE/build"/* 2>/dev/null || true
+    # Ensure toolbuild directories are clean
+    run_cmd sudo rm -rf "$ENGINE_OUT_DIR"/* 2>/dev/null || true
+    run_cmd sudo rm -rf "$ENGINE_BUILD_DIR"/* 2>/dev/null || true
 
     log_info "Pre-build cleanup completed"
 }
@@ -128,16 +123,14 @@ cleanup_pre_package() {
     log_info "Running pre-package cleanup..."
 
     # Clean up build artifacts that are no longer needed
-    # These are typically large files used during build but not in final package
+    # Keep super.img as it's needed for packaging
 
-    # Clean extracted baserom if not needed
-    if [[ -d "$GITHUB_WORKSPACE/build/baserom" ]]; then
-        # Check if super.img exists (needed for packaging)
-        if [[ -f "$GITHUB_WORKSPACE/build/baserom/images/super.img" ]]; then
-            log_info "Preserving super.img for packaging, cleaning other baserom files..."
-            # Only remove other files, keep super.img
-            find "$GITHUB_WORKSPACE/build/baserom" -type f ! -name "super.img" -delete 2>/dev/null || true
-            find "$GITHUB_WORKSPACE/build/baserom" -type d -empty -delete 2>/dev/null || true
+    if [[ -d "$ENGINE_BUILD_DIR/baserom/images" ]]; then
+        if [[ -f "$ENGINE_BUILD_DIR/baserom/images/super.img" ]]; then
+            log_info "Preserving super.img for packaging..."
+            # Remove other baserom files to free space
+            find "$ENGINE_BUILD_DIR/baserom" -type f ! -name "super.img" -delete 2>/dev/null || true
+            find "$ENGINE_BUILD_DIR/baserom" -type d -empty -delete 2>/dev/null || true
         fi
     fi
 
@@ -146,60 +139,59 @@ cleanup_pre_package() {
 }
 
 # Post-package cleanup: After final ZIP is created
+# CRITICAL: This preserves the final ZIP until all uploads complete
 cleanup_post_package() {
     log_info "Running post-package cleanup..."
 
-    # The final ZIP should already exist in out/ directory
-    # Clean up everything else that can be regenerated
+    # The final ZIP is in ENGINE_OUT_DIR and must be preserved
+    # Only clean build artifacts that are no longer needed
 
-    # Clean build/baserom - the final ZIP is independent now
-    if [[ -d "$GITHUB_WORKSPACE/build/baserom" ]]; then
-        log_info "Removing baserom staging directory..."
-        run_cmd sudo rm -rf "$GITHUB_WORKSPACE/build/baserom" 2>/dev/null || true
+    # Clean baserom staging
+    if [[ -d "$ENGINE_BUILD_DIR/baserom" ]]; then
+        log_info "Removing baserom staging..."
+        run_cmd sudo rm -rf "$ENGINE_BUILD_DIR/baserom" 2>/dev/null || true
     fi
 
-    # Clean build artifacts that are no longer needed
+    # Clean build artifacts no longer needed after packaging
     log_info "Removing build artifacts..."
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/build/out" 2>/dev/null || true
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/build/payload" 2>/dev/null || true
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/build/work" 2>/dev/null || true
+    run_cmd sudo rm -rf "$ENGINE_BUILD_DIR/payload" 2>/dev/null || true
+    run_cmd sudo rm -rf "$ENGINE_BUILD_DIR/work" 2>/dev/null || true
+    run_cmd sudo rm -rf "$ENGINE_BUILD_DIR/out" 2>/dev/null || true
 
-    # Clean any temporary files
-    find "$GITHUB_WORKSPACE" -name "*.tmp" -delete 2>/dev/null || true
-    find "$GITHUB_WORKSPACE" -name "*.temp" -delete 2>/dev/null || true
-    find "$GITHUB_WORKSPACE" -name "*.log" -path "*/build/*" -delete 2>/dev/null || true
+    # Clean temporary files
+    find "$WORKSPACE" -name "*.tmp" -delete 2>/dev/null || true
+    find "$WORKSPACE" -name "*.temp" -delete 2>/dev/null || true
 
     report_disk
-    log_info "Post-package cleanup completed"
+    log_info "Post-package cleanup completed (final ZIP preserved)"
 }
 
 # Final cleanup: Always runs (on success, failure, or cancel)
 cleanup_final() {
     log_info "Running final cleanup..."
 
-    # Clean up runtime directories
-    run_cmd rm -rf "$GITHUB_WORKSPACE/runtime" 2>/dev/null || true
+    # Clean runtime directories
+    run_cmd rm -rf "$WORKSPACE/runtime" 2>/dev/null || true
 
-    # Clean up rclone config
-    run_cmd rm -f "$GITHUB_WORKSPACE/toolbuild/rclone.conf" 2>/dev/null || true
-    run_cmd rm -f "$GITHUB_WORKSPACE/rclone.conf" 2>/dev/null || true
+    # Clean rclone config (credentials)
+    run_cmd rm -f "$TOOLBUILD_DIR/rclone.conf" 2>/dev/null || true
+    run_cmd rm -f "$WORKSPACE/rclone.conf" 2>/dev/null || true
 
-    # Clean up build and out directories
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/toolbuild/out" 2>/dev/null || true
-    run_cmd sudo rm -rf "$GITHUB_WORKSPACE/toolbuild/build" 2>/dev/null || true
+    # Clean ALL of toolbuild directory (final ZIP, build tree, everything)
+    log_info "Cleaning toolbuild directory..."
+    run_cmd sudo rm -rf "$TOOLBUILD_DIR" 2>/dev/null || true
 
-    # Clean up temporary directories from previous steps
-    run_cmd rm -rf "$GITHUB_WORKSPACE/temp" 2>/dev/null || true
-    run_cmd rm -rf "$GITHUB_WORKSPACE/.deadzone-runtime" 2>/dev/null || true
+    # Clean temporary directories
+    run_cmd rm -rf "$WORKSPACE/temp" 2>/dev/null || true
+    run_cmd rm -rf "$WORKSPACE/.deadzone-runtime" 2>/dev/null || true
 
     # Clean pip cache
     run_cmd pip3 cache purge 2>/dev/null || true
 
-    # Clean APT cache if no more installs needed
+    # Clean APT cache
     run_cmd sudo apt-get clean 2>/dev/null || true
     run_cmd sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 
-    # Report final disk state
     report_disk
     log_info "Final cleanup completed"
 }
@@ -209,11 +201,11 @@ cleanup_light() {
     log_info "Running lightweight cleanup..."
 
     # Only remove clearly temporary files
-    run_cmd rm -rf "$GITHUB_WORKSPACE/temp" 2>/dev/null || true
-    run_cmd rm -rf "$GITHUB_WORKSPACE/.deadzone-runtime" 2>/dev/null || true
+    run_cmd rm -rf "$WORKSPACE/temp" 2>/dev/null || true
+    run_cmd rm -rf "$WORKSPACE/.deadzone-runtime" 2>/dev/null || true
 
-    # Clean npm/yarn cache if present
-    if [[ -d "$GITHUB_WORKSPACE/node_modules" ]]; then
+    # Clean npm cache if present
+    if [[ -d "$WORKSPACE/node_modules" ]]; then
         log_info "Cleaning npm cache..."
         run_cmd npm cache clean --force 2>/dev/null || true
     fi
@@ -232,7 +224,7 @@ Modes:
   bootstrap    Initial runner setup cleanup (pre-build)
   pre-build    Cleanup before ROM build starts
   pre-package  Cleanup before packaging stage
-  post-package Cleanup after final ZIP is created
+  post-package Cleanup after final ZIP is created (preserves final ZIP)
   final        Final cleanup (always runs)
   light        Lightweight cleanup for non-ROM workflows
 
