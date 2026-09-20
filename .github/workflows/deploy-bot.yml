@@ -25,6 +25,8 @@ env:
   D1_NAME: deadzone-bot
   QUEUE_NAME: deadzone-build-events
   WRANGLER_VERSION: "4.114.0"
+  TYPESCRIPT_VERSION: "7.0.2"
+  VITEST_VERSION: "4.1.10"
 
 jobs:
   deploy:
@@ -106,8 +108,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: rm -rf "$GITHUB_WORKSPACE/.deadzone-runtime"
 
-      - name: 📦 Install project metadata
-        run: npm ci
+      - name: 📦 Install project dependencies
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          echo "Installed versions:"
+          node --version
+          npm --version
+          ./node_modules/.bin/tsc --version
+          ./node_modules/.bin/vitest --version
+          ./node_modules/.bin/wrangler --version
 
       - name: ✨ Verify Premium emoji catalog
         run: npm run emoji:verify:animated
@@ -131,7 +141,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           resolve_database_id() {
-            npx --yes "wrangler@${WRANGLER_VERSION}" d1 list --json |
+            ./node_modules/.bin/wrangler d1 list --json |
               jq -r --arg name "$D1_NAME" '
                 def rows:
                   if type == "array" then .
@@ -165,14 +175,14 @@ jobs:
           NO_COLOR: "1"
         run: |
           set -Eeuo pipefail
-          queue_list="$(npx --yes "wrangler@${WRANGLER_VERSION}" queues list --page 1 2>&1 || true)"
+          queue_list="$(./node_modules/.bin/wrangler queues list --page 1 2>&1 || true)"
           if printf '%s\n' "$queue_list" | grep -Eq "(^|[^[:alnum:]_-])${QUEUE_NAME}([^[:alnum:]_-]|$)"; then
             echo "Queue exists: ${QUEUE_NAME}"
             exit 0
           fi
 
           set +e
-          create_output="$(npx --yes "wrangler@${WRANGLER_VERSION}" queues create "$QUEUE_NAME" 2>&1)"
+          create_output="$(./node_modules/.bin/wrangler queues create "$QUEUE_NAME" 2>&1)"
           create_status=$?
           set -e
           if ((create_status != 0)) && ! grep -qi 'already exists' <<<"$create_output"; then
@@ -195,7 +205,7 @@ jobs:
           NO_COLOR: "1"
         run: |
           set -Eeuo pipefail
-          npx --yes "wrangler@${WRANGLER_VERSION}" d1 migrations apply "$D1_NAME" \
+          ./node_modules/.bin/wrangler d1 migrations apply "$D1_NAME" \
             --remote \
             --config wrangler.production.jsonc
 
@@ -229,7 +239,7 @@ jobs:
           writeFileSync(outputPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
           NODE
 
-          npx --yes "wrangler@${WRANGLER_VERSION}" deploy \
+          ./node_modules/.bin/wrangler deploy \
             --config wrangler.production.jsonc \
             --secrets-file "$secrets_file" |
             tee "$output_file"
