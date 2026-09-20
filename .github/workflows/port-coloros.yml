@@ -426,14 +426,6 @@ jobs:
             --sourceforge-url "${DEADZONE_SOURCEFORGE_URL:-}" \
             --pixeldrain-url "${DEADZONE_PIXELDRAIN_URL:-}"
 
-      - name: 🧹 Cleanup Port workspace
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          echo "[CLEANUP] Running final Port workspace cleanup..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" final || true
-          rm -f toolbuild/rclone.conf
-
       - name: ❌ Report failed Port build
         if: failure()
         shell: bash
@@ -473,3 +465,11 @@ jobs:
           python3 runtime/report_build_event.py cancelled \
             --project port_coloros \
             --message "Port ROM build cancelled."
+
+      - name: 🧹 Cleanup Port workspace
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          echo "[CLEANUP] Running final Port workspace cleanup..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" final || true
+          rm -f toolbuild/rclone.conf
