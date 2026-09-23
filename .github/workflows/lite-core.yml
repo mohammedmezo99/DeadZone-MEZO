@@ -274,14 +274,14 @@ jobs:
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
-          sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log
+          sudo -E bash build.sh "$DEADZONE_INPUT_URL" "$DEADZONE_SOURCE_REPOSITORY" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" 2>&1 | tee build_action.log | tee -a build-full.log
 
       - name: 📦 Pack Super
         working-directory: toolbuild
         run: |
           set -Eeuo pipefail
           python3 notify.py pack "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
-          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash packROM.sh 2>&1 | tee -a build_action.log | tee -a build-full.log
 
       - name: 🗜️ Package and upload Google Drive
         working-directory: toolbuild
@@ -290,21 +290,21 @@ jobs:
           python3 notify.py upload "$DEADZONE_SOURCE_REPOSITORY" "$DEADZONE_INPUT_URL" "lite" "$DEADZONE_BUILDER_NAME" "$DEADZONE_BUILDER_ID" || true
 
           # Report disk space before packaging
-          echo "[PERF][BEFORE PACKAGE]"
-          df -h / | tail -1 | awk '{print "  Root:", $4, "available"}'
-          if [[ -d /workspace ]]; then df -h /workspace | tail -1 | awk '{print "  Workspace:", $4, "available"}'; fi
-          free -h | awk '/^Mem:/ {printf "  Memory: %s total, %s free\n", $2, $7}'
-          nproc | xargs -I{} echo "  CPU cores: {}"
+          echo "[PERF][BEFORE PACKAGE]" | tee -a build-full.log
+          df -h / | tail -1 | awk '{print "  Root:", $4, "available"}' | tee -a build-full.log
+          if [[ -d /workspace ]]; then df -h /workspace | tail -1 | awk '{print "  Workspace:", $4, "available"}' | tee -a build-full.log; fi
+          free -h | awk '/^Mem:/ {printf "  Memory: %s total, %s free\n", $2, $7}' | tee -a build-full.log
+          nproc | xargs -I{} echo "  CPU cores: {}" | tee -a build-full.log
 
           set +e
-          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log
+          sudo -E bash uploadROM.sh 2>&1 | tee -a build_action.log | tee -a build-full.log
           google_status=${PIPESTATUS[0]}
           set -e
           printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
 
           mapfile -t final_zips < <(find "$PWD/out" -maxdepth 1 -type f -name 'DeadZone_Lite_*.zip' -print 2>/dev/null)
           if (( ${#final_zips[@]} != 1 )); then
-            echo "::error::Expected exactly one preserved final Lite ZIP; found ${#final_zips[@]}"
+            echo "::error::Expected exactly one preserved final Lite ZIP; found ${#final_zips[@]}" | tee -a build-full.log
             exit 1
           fi
 
@@ -330,11 +330,11 @@ jobs:
           printf 'DEADZONE_FILE_SIZE=%s\nDEADZONE_INTEGRITY_VERIFIED=1\nDEADZONE_RESULT_NAME=%s\n' \
             "$final_size_human" "$final_name" >> "$GITHUB_ENV"
 
-          echo "[PERF] Final ZIP verified by create_zip.py streaming validation"
-          echo "[PERF] File size: ${final_size_human}"
+          echo "[PERF] Final ZIP verified by create_zip.py streaming validation" | tee -a build-full.log
+          echo "[PERF] File size: ${final_size_human}" | tee -a build-full.log
 
           # Post-package cleanup via centralized helper
-          echo "[PERF][POST-PACKAGE] Running cleanup..."
+          echo "[PERF][POST-PACKAGE] Running cleanup..." | tee -a build-full.log
           bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" post-package || true
 
       - name: ⬆️ Upload SourceForge and PixelDrain
@@ -396,7 +396,7 @@ jobs:
           set +e
           bash "$GITHUB_WORKSPACE/runtime/upload-mirrors.sh" \
             "Lite" "$codename" "$os_folder" "$final_zip" "$final_name" \
-            2>&1 | tee -a build_action.log
+            2>&1 | tee -a build_action.log | tee -a build-full.log
           mirror_status=${PIPESTATUS[0]}
           set -e
 
@@ -485,6 +485,17 @@ jobs:
         if: always()
         run: |
           set -Euo pipefail
-          echo "[CLEANUP] Running final Lite workspace cleanup..."
+          echo "[CLEANUP] Running final Lite workspace cleanup..." | tee -a build-full.log
           bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" final || true
           rm -f toolbuild/rclone.conf
+
+      - name: 📋 Upload debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            toolbuild/build-full.log
+            toolbuild/build_action.log
+          retention-days: 1
+          if-no-files-found: ignore

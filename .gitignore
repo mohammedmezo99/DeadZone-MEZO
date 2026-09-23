@@ -1,0 +1,4 @@
+# Build logs - these are uploaded as GitHub Actions artifacts
+# and should NEVER be committed to the repository.
+build-full.log
+build_action.log
