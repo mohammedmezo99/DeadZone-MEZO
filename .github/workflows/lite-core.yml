@@ -365,8 +365,8 @@ jobs:
           final_zip="${final_zips[0]}"
           final_name="$(basename "$final_zip")"
 
-          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/ddevice/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
-          rom_version="$(tr -d '\r\n' < "$PWD/bin/ddevice/base_rom_code.txt")"
+          codename="$(tr '[:lower:]' '[:upper:]' < "$PWD/bin/device/device_f.txt" | sed 's/ /_/g' | tr -cd 'A-Za-z0-9._+-')"
+          rom_version="$(tr -d '\r\n' < "$PWD/bin/device/base_rom_code.txt")"
           if [[ "$rom_version" =~ ^(OS[0-9]+) ]]; then
             os_folder="${BASH_REMATCH[1]}"
           elif [[ "$rom_version" =~ ^[Vv]([0-9]+) ]]; then
@@ -427,7 +427,7 @@ jobs:
             echo "::warning::Website release skipped: final ZIP name is unavailable"
             exit 0
           }
-          state_dir="$PWD/bin/ddevice"
+          state_dir="$PWD/bin/device"
           python3 "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
             --request-id "$DEADZONE_REQUEST_ID" \
             --edition-version "$(tr -d '\r\n' < Version)" \
