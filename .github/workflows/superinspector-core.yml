@@ -4,256 +4,448 @@ on:
   workflow_call:
     inputs:
       job_id:
-        description: 🆔 DeadZone Super Inspector job ID
+        description: "DeadZone Super Inspector job ID"
         required: true
         type: string
-      profile_object_key:
-        description: 📦 Canonical profile R2 object key
+      rom_url:
+        description: "HTTP(S) URL to the Xiaomi Fastboot ROM archive"
         required: true
         type: string
-      inspector_commit:
-        description: 🔒 Pinned DeadZone-SuperInspector commit SHA
+      original_filename:
+        description: "Original ROM filename (used for archive type sniffing)"
+        required: false
+        type: string
+        default: ""
+      inspector_ref:
+        description: "Pinned DeadZone-SuperInspector commit SHA"
+        required: true
+        type: string
+      target_repo:
+        description: "Repository slug that owns the workflow run"
         required: true
         type: string
       profile_id:
-        description: 🪪 Canonical profile ID
+        description: "Pre-allocated 16-hex profile ID (idempotency key)"
         required: true
         type: string
       callback_url:
-        description: 🔗 Signed DeadZone callback URL
+        description: "Signed DeadZone callback URL"
         required: true
         type: string
+      max_rom_bytes:
+        description: "Hard cap for ROM download in bytes"
+        required: false
+        type: number
+        default: 4294967296  # 4 GiB
+      downloads_root:
+        description: "Directory inside the runner where ROMs and profiles live"
+        required: false
+        type: string
+        default: "deadzone-runtime/jobs"
     secrets:
       SUPER_INSPECTOR_REPOSITORY_TOKEN:
         required: false
-      CLOUDFLARE_R2_ACCESS_KEY:
-        required: true
-      CLOUDFLARE_R2_SECRET_KEY:
-        required: true
-      CLOUDFLARE_ACCOUNT_ID:
-        required: true
-      CLOUDFLARE_R2_BUCKET:
-        required: true
       DEADZONE_CALLBACK_SECRET:
+        required: true
+      GITHUB_TOKEN:
         required: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  publish:
-    name: 🚀 Publish Super Profile
+  analyze_and_publish:
+    name: "Analyze + Publish"
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       DEADZONE_JOB_ID: ${{ inputs.job_id }}
-      DEADZONE_PROFILE_OBJECT_KEY: ${{ inputs.profile_object_key }}
       DEADZONE_PROFILE_ID: ${{ inputs.profile_id }}
-      DEADZONE_INSPECTOR_COMMIT: ${{ inputs.inspector_commit }}
+      DEADZONE_INSPECTOR_REF: ${{ inputs.inspector_ref }}
+      DEADZONE_TARGET_REPO: ${{ inputs.target_repo }}
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
       DEADZONE_CALLBACK_SECRET: ${{ secrets.DEADZONE_CALLBACK_SECRET }}
-      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      R2_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
-      R2_SECRET_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_KEY }}
-      R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-      R2_ENDPOINT: ${{ format('https://{0}.r2.cloudflarestorage.com', secrets.CLOUDFLARE_ACCOUNT_ID) }}
+      DEADZONE_MAX_ROM_BYTES: ${{ inputs.max_rom_bytes }}
+      DEADZONE_DOWNLOADS_ROOT: ${{ inputs.downloads_root }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: 🧾 Validate publish inputs
-        shell: python
-        env:
-          JOB_ID: ${{ inputs.job_id }}
-          PROFILE_OBJECT_KEY: ${{ inputs.profile_object_key }}
-          PROFILE_ID: ${{ inputs.profile_id }}
-          INSPECTOR_COMMIT: ${{ inputs.inspector_commit }}
-        run: |
-          import os
-          import re
-
-          for name in ("JOB_ID", "PROFILE_OBJECT_KEY", "PROFILE_ID", "INSPECTOR_COMMIT"):
-              value = os.environ[name].strip()
-              if not value:
-                  raise SystemExit(f"{name} must not be empty")
-              if len(value) > 256:
-                  raise SystemExit(f"{name} too long")
-          if not re.fullmatch(r"[A-Za-z0-9._/-]+", os.environ["PROFILE_OBJECT_KEY"]):
-              raise SystemExit("PROFILE_OBJECT_KEY contains forbidden characters")
-          if not re.fullmatch(r"[a-f0-9]{7,64}", os.environ["INSPECTOR_COMMIT"]):
-              raise SystemExit("INSPECTOR_COMMIT must be a hex SHA")
-
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: 📥 Download canonical profile from R2
-        shell: python
-        run: |
-          import os
-          import sys
-          import boto3
-          from botocore.config import Config
-
-          endpoint = os.environ["R2_ENDPOINT"]
-          bucket = os.environ["R2_BUCKET"]
-          key = os.environ["DEADZONE_PROFILE_OBJECT_KEY"]
-          out = os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json")
-
-          client = boto3.client(
-              "s3",
-              endpoint_url=endpoint,
-              aws_access_key_id=os.environ["R2_ACCESS_KEY"],
-              aws_secret_access_key=os.environ["R2_SECRET_KEY"],
-              config=Config(retries={"max_attempts": 5, "mode": "standard"}),
-          )
-          client.download_file(bucket, key, out)
-          size = os.path.getsize(out)
-          if size <= 0 or size > 16 * 1024 * 1024:
-              raise SystemExit(f"profile object size out of range: {size}")
-          print(f"Downloaded {key} → {out} ({size} bytes)")
-
-      - name: 🔏 Compute profile hash
-        shell: python
-        run: |
-          import hashlib
-          import os
-          import pathlib
-
-          path = pathlib.Path(os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json"))
-          digest = hashlib.sha256(path.read_bytes()).hexdigest()
-          os.environ["DEADZONE_PROFILE_SHA256"] = digest
-          with open("profile.sha256", "w", encoding="utf-8") as handle:
-              handle.write(digest + "\n")
-          print("profile_sha256 =", digest)
-
-      - name: 📤 Report publish start
-        shell: python
-        env:
-          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-          JOB_ID: ${{ inputs.job_id }}
-          TARGET: ${{ github.repository }}
-        run: |
-          import hashlib
-          import hmac
-          import json
-          import os
-          import urllib.request
-
-          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          payload = json.dumps({
-              "type": "publish.started",
-              "jobId": os.environ["JOB_ID"],
-              "target": os.environ["TARGET"],
-          }, separators=(",", ":")).encode("utf-8")
-          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-          request = urllib.request.Request(url, data=payload, method="POST")
-          request.add_header("content-type", "application/json")
-          request.add_header("x-deadzone-signature", signature)
-          with urllib.request.urlopen(request, timeout=15) as response:
-              response.read()
-          print("publish.started delivered")
-
-      - name: 🔁 Refresh target checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 📚 Materialise canonical profile under profiles/super/<id>/
-        shell: python
-        env:
-          PROFILE_ID: ${{ inputs.profile_id }}
-        run: |
-          import json
-          import os
-          import pathlib
-          import shutil
-
-          source = pathlib.Path(os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json"))
-          profile = json.loads(source.read_text(encoding="utf-8"))
-          device = profile.get("device", {}).get("primary_codename") or profile.get("profile_id", "device")
-          target_dir = pathlib.Path("profiles/super") / device / os.environ["PROFILE_ID"]
-          target_dir.mkdir(parents=True, exist_ok=True)
-          shutil.copy(source, target_dir / "device.profile.json")
-          (target_dir / "INSPECTOR_COMMIT").write_text(
-              os.environ.get("DEADZONE_INSPECTOR_COMMIT", "") + "\n",
-              encoding="utf-8",
-          )
-          (target_dir / "PROFILE_SHA256").write_text(
-              os.environ.get("DEADZONE_PROFILE_SHA256", "") + "\n",
-              encoding="utf-8",
-          )
-
-      - name: 📝 Commit profile
+      - name: "Validate inputs"
         shell: bash
         run: |
-          set -euo pipefail
-          git config user.name "deadzone-bot"
-          git config user.email "bot@deadzone.local"
-          git add profiles/super
-          if git diff --cached --quiet; then
-              echo "No changes to commit"
-          else
-              git commit -m "super(profile): ${{ inputs.profile_id }} via ${{ inputs.inspector_commit }}"
-              git push
+          set -Eeuo pipefail
+          [[ "$DEADZONE_JOB_ID" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || { echo "invalid job_id" >&2; exit 1; }
+          [[ "$DEADZONE_PROFILE_ID" =~ ^[a-f0-9]{16}$ ]] || { echo "invalid profile_id" >&2; exit 1; }
+          [[ "$DEADZONE_INSPECTOR_REF" =~ ^[a-f0-9]{7,64}$ ]] || { echo "invalid inspector ref" >&2; exit 1; }
+          [[ "$DEADZONE_TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "invalid target_repo" >&2; exit 1; }
+          [[ "$DEADZONE_CALLBACK_URL" =~ ^https:// ]] || { echo "callback_url must be https" >&2; exit 1; }
+          [[ "$DEADZONE_MAX_ROM_BYTES" =~ ^[0-9]+$ ]] || { echo "max_rom_bytes invalid" >&2; exit 1; }
+
+      - name: "Create isolated workspace"
+        id: workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/$DEADZONE_DOWNLOADS_ROOT/$DEADZONE_JOB_ID"
+          mkdir -p "$root"/{input,inspector,output,logs}
+          echo "ROOT=$root" >> "$GITHUB_OUTPUT"
+          echo "workspace=$root"
+
+      - name: "Download ROM (streamed, bounded)"
+        id: download
+        shell: bash
+        env:
+          ROM_URL: ${{ inputs.rom_url }}
+          ORIGINAL_FILENAME: ${{ inputs.original_filename }}
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          rom_dir="$root/input"
+          mkdir -p "$rom_dir"
+
+          # Pick a deterministic archive name so idempotent retries hit cache.
+          base_name="$ORIGINAL_FILENAME"
+          if [[ -z "$base_name" ]]; then
+            base_name="$(basename "${ROM_URL%%\?*}")"
+          fi
+          base_name="${base_name:-rom.bin}"
+          base_name="$(printf '%s' "$base_name" | tr -cd 'A-Za-z0-9._-')"
+          [[ -n "$base_name" ]] || base_name="rom.bin"
+          target="$rom_dir/$base_name"
+
+          # Tell `curl` to refuse credentials-in-URL, follow at most 10 redirects,
+          # enforce the hard byte cap, fail on HTTP >=400, and stream to disk.
+          max_bytes="$DEADZONE_MAX_ROM_BYTES"
+
+          set +e
+          http_args=(
+            --silent --show-error --location --max-redirs 10
+            --max-filesize "$max_bytes"
+            --fail-with-body
+            --connect-timeout 15
+            --max-time 1800
+            --output "$target.part"
+            --write-out "http_code=%{http_code}\nsize=%{size_download}\n"
+            -A "DeadZone-SuperInspector/1.0 (+https://github.com/mohammedmezo99)"
+          )
+
+          # Strip userinfo from the URL if present (defense in depth) and reject
+          # schemes other than http(s).
+          safe_url="$ROM_URL"
+          if [[ "$safe_url" =~ ^[A-Za-z]+://([^/:@]+):([^/:@]+)@ ]]; then
+            echo "Refusing URL with embedded credentials" >&2
+            exit 1
+          fi
+          case "$safe_url" in
+            http://*|https://*) ;;
+            *) echo "Refusing non-http(s) URL" >&2; exit 1 ;;
+          esac
+
+          curl "${http_args[@]}" "$safe_url" 2>&1 | tee "$rom_dir/curl.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            echo "ROM download failed (curl exit $status)" >&2
+            exit 1
+          fi
+          if [[ ! -s "$target.part" ]]; then
+            echo "Downloaded file is empty" >&2
+            exit 1
+          fi
+          mv "$target.part" "$target"
+          size=$(stat -c '%s' "$target")
+          if (( size <= 0 )); then
+            echo "Downloaded archive is empty" >&2
+            exit 1
+          fi
+          if (( size > max_bytes )); then
+            echo "Archive exceeds $max_bytes bytes" >&2
+            exit 1
+          fi
+          sha256=$(sha256sum "$target" | awk '{print $1}')
+          echo "ROM_SHA256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "ROM_PATH=$target" >> "$GITHUB_OUTPUT"
+          echo "ROM_SIZE=$size" >> "$GITHUB_OUTPUT"
+          echo "ROM_NAME=$base_name" >> "$GITHUB_OUTPUT"
+          echo "downloaded $base_name ($size bytes) sha256=$sha256"
+
+      - name: "Report download.completed"
+        if: success()
+        shell: bash
+        env:
+          ROM_SHA256: ${{ steps.download.outputs.ROM_SHA256 }}
+          ROM_SIZE: ${{ steps.download.outputs.ROM_SIZE }}
+        run: |
+          set -Eeuo pipefail
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          python3 - "$DEADZONE_CALLBACK_URL" "$tmp" <<'PY'
+          import hashlib, hmac, json, os, sys, urllib.request
+          url, tmp = sys.argv[1], sys.argv[2]
+          payload = {
+              "type": "download.completed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
+              "profileId": os.environ["DEADZONE_PROFILE_ID"],
+              "target": os.environ["DEADZONE_TARGET_REPO"],
+              "romSha256": os.environ["ROM_SHA256"],
+              "romSize": int(os.environ["ROM_SIZE"]),
+          }
+          body = json.dumps(payload, separators=(",", ":")).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(url, data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              resp.read()
+          PY
+
+      - name: "Checkout pinned DeadZone-SuperInspector"
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          git clone --depth 1 --no-tags --branch "$DEADZONE_INSPECTOR_REF" \
+            "https://github.com/mohammedmezo99/DeadZone-SuperInspector" \
+            "$root/inspector"
+          # Try to deepen to the exact ref so reporting matches the version
+          cd "$root/inspector"
+          git fetch --depth 1 origin "$DEADZONE_INSPECTOR_REF" || true
+          git checkout --quiet "$DEADZONE_INSPECTOR_REF" || true
+          echo "inspector @ $(git rev-parse HEAD)"
+
+      - name: "Run Super Inspector analyze"
+        id: analyze
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          rom="${{ steps.download.outputs.ROM_PATH }}"
+          out="$root/output"
+          mkdir -p "$out"
+          cd "$root/inspector"
+          chmod +x ./build.sh || true
+          ./build.sh analyze "$rom" --output "$out" 2>&1 | tee "$root/logs/analyze.log"
+          profile="$out/device.profile.json"
+          if [[ ! -s "$profile" ]]; then
+            echo "device.profile.json missing" >&2
+            exit 1
+          fi
+          echo "PROFILE_PATH=$profile" >> "$GITHUB_OUTPUT"
+          echo "PROFILE_SHA256=$(sha256sum "$profile" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: "Report analyze.completed"
+        if: success()
+        shell: bash
+        env:
+          PROFILE_SHA256: ${{ steps.analyze.outputs.PROFILE_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$DEADZONE_CALLBACK_URL" <<'PY'
+          import hashlib, hmac, json, os, sys, urllib.request
+          url = sys.argv[1]
+          payload = {
+              "type": "analyze.completed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
+              "profileId": os.environ["DEADZONE_PROFILE_ID"],
+              "target": os.environ["DEADZONE_TARGET_REPO"],
+              "profileSha256": os.environ["PROFILE_SHA256"],
+          }
+          body = json.dumps(payload, separators=(",", ":")).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(url, data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              resp.read()
+          PY
+
+      - name: "Validate Device Profile (canonical schema)"
+        id: validate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "${{ steps.analyze.outputs.PROFILE_PATH }}" <<'PY'
+          import json, re, sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          data = json.loads(p.read_text(encoding="utf-8"))
+          required = {
+              "profile_id": str,
+              "schemaVersion": str,
+              "device": dict,
+              "rom": dict,
+          }
+          missing = [k for k, t in required.items() if not isinstance(data.get(k), t)]
+          if missing:
+              raise SystemExit(f"profile missing required keys: {missing}")
+          profile_id = data["profile_id"]
+          if not re.fullmatch(r"[a-f0-9]{16}", profile_id):
+              raise SystemExit(f"profile_id must be 16 lowercase hex chars, got {profile_id!r}")
+          primary = data["device"].get("primary_codename")
+          if not isinstance(primary, str) or not primary:
+              raise SystemExit("device.primary_codename missing")
+          inspector = data.get("inspector") or {}
+          ref = inspector.get("ref") or inspector.get("commit")
+          if not isinstance(ref, str) or not re.fullmatch(r"[a-f0-9]{7,64}", ref):
+              raise SystemExit("inspector.ref missing or not a sha")
+          if not isinstance(data.get("super"), dict):
+              raise SystemExit("super metadata missing")
+          print("profile ok id=" + profile_id + " device=" + primary)
+          PY
+
+      - name: "Report validation.completed"
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$DEADZONE_CALLBACK_URL" <<'PY'
+          import hashlib, hmac, json, os, sys, urllib.request
+          url = sys.argv[1]
+          payload = {
+              "type": "validation.completed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "profileId": os.environ["DEADZONE_PROFILE_ID"],
+              "target": os.environ["DEADZONE_TARGET_REPO"],
+          }
+          body = json.dumps(payload, separators=(",", ":")).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(url, data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              resp.read()
+          PY
+
+      - name: "Materialize canonical profile under profiles/super/<device>/<id>/"
+        shell: bash
+        env:
+          PROFILE_PATH: ${{ steps.analyze.outputs.PROFILE_PATH }}
+          PROFILE_SHA256: ${{ steps.analyze.outputs.PROFILE_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$PROFILE_PATH" <<'PY'
+          import json, os, pathlib, shutil, sys
+          profile = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          device = profile["device"]["primary_codename"]
+          target = pathlib.Path("profiles/super") / device / os.environ["DEADZONE_PROFILE_ID"]
+          target.mkdir(parents=True, exist_ok=True)
+          shutil.copy(sys.argv[1], target / "device.profile.json")
+          (target / "INSPECTOR_COMMIT").write_text(os.environ["DEADZONE_INSPECTOR_REF"] + "\n", encoding="utf-8")
+          (target / "PROFILE_SHA256").write_text(os.environ["PROFILE_SHA256"] + "\n", encoding="utf-8")
+          print("materialised", target)
+          PY
+
+      - name: "Publish to xiaomi_Lite and xiaomi_Port"
+        id: publish
+        shell: bash
+        env:
+          PROFILE_PATH: ${{ steps.analyze.outputs.PROFILE_PATH }}
+          PROFILE_SHA256: ${{ steps.analyze.outputs.PROFILE_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          for target in "$DEADZONE_TARGET_REPO" "mohammedmezo99/DeadZone-xiaomi_Lite" "mohammedmezo99/DeadZone-xiaomi_Port"; do
+            echo "publishing to $target"
+            gh repo clone "$target" "publish-${target//\//_}" -- --depth 1 --quiet || \
+              { echo "clone failed for $target" >&2; exit 1; }
+            safe_dir="publish-${target//\//_}"
+            cd "$safe_dir"
+            git config user.name "deadzone-bot"
+            git config user.email "bot@deadzone.local"
+            device=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["device"]["primary_codename"])' "$PROFILE_PATH")
+            target_dir="profiles/super/$device/$DEADZONE_PROFILE_ID"
+            mkdir -p "$target_dir"
+            cp "$GITHUB_WORKSPACE/$PROFILE_PATH" "$target_dir/device.profile.json"
+            printf '%s\n' "$DEADZONE_INSPECTOR_REF" > "$target_dir/INSPECTOR_COMMIT"
+            printf '%s\n' "$PROFILE_SHA256" > "$target_dir/PROFILE_SHA256"
+            git add profiles/super
+            if git diff --cached --quiet; then
+              echo "no changes for $target"
+            else
+              if ! git diff --cached --check; then
+                git commit -m "super(profile): $DEADZONE_PROFILE_ID via $DEADZONE_INSPECTOR_REF"
+                git push
+              fi
+            fi
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      - name: "Report publish.completed"
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$DEADZONE_CALLBACK_URL" "$GITHUB_SHA" <<'PY'
+          import hashlib, hmac, json, os, sys, urllib.request
+          url, commit_sha = sys.argv[1], sys.argv[2]
+          payload = {
+              "type": "publish.completed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "profileId": os.environ["DEADZONE_PROFILE_ID"],
+              "target": os.environ["DEADZONE_TARGET_REPO"],
+              "commitSha": commit_sha,
+          }
+          body = json.dumps(payload, separators=(",", ":")).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(url, data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              resp.read()
+          PY
+
+      - name: "Report failure"
+        if: failure()
+        shell: bash
+        env:
+          FAILURE_STEP: ${{ github.job }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$DEADZONE_CALLBACK_URL" <<'PY'
+          import hashlib, hmac, json, os, sys, urllib.request
+          url = sys.argv[1]
+          payload = {
+              "type": "analyze.failed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "profileId": os.environ["DEADZONE_PROFILE_ID"],
+              "target": os.environ["DEADZONE_TARGET_REPO"],
+              "error": f"workflow failed at {os.environ['FAILURE_STEP']}",
+          }
+          body = json.dumps(payload, separators=(",", ":")).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(url, data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  resp.read()
+          except Exception as exc:
+              print("warning: failed to POST analyze.failed:", exc)
+          PY
+
+      - name: "Cleanup temporary ROM + logs"
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          if [[ -n "$root" && -d "$root" ]]; then
+            tar -C "$root" -czf "$root/logs/bundle.tar.gz" logs || true
+            rm -rf "$root/input" "$root/inspector"
+            echo "cleaned $root (logs preserved in bundle)"
           fi
 
-      - name: 📣 Report publish.completed
-        if: success()
-        shell: python
-        env:
-          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-          JOB_ID: ${{ inputs.job_id }}
-          TARGET: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.sha }}
-        run: |
-          import hashlib
-          import hmac
-          import json
-          import os
-          import urllib.request
-
-          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          payload = json.dumps({
-              "type": "publish.completed",
-              "jobId": os.environ["JOB_ID"],
-              "target": os.environ["TARGET"],
-              "commitSha": os.environ["COMMIT_SHA"],
-              "profileId": os.environ.get("DEADZONE_PROFILE_ID", ""),
-          }, separators=(",", ":")).encode("utf-8")
-          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-          request = urllib.request.Request(url, data=payload, method="POST")
-          request.add_header("content-type", "application/json")
-          request.add_header("x-deadzone-signature", signature)
-          with urllib.request.urlopen(request, timeout=15) as response:
-              response.read()
-
-      - name: 📣 Report publish.failed
-        if: failure()
-        shell: python
-        env:
-          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-          JOB_ID: ${{ inputs.job_id }}
-          TARGET: ${{ github.repository }}
-        run: |
-          import hashlib
-          import hmac
-          import json
-          import os
-          import urllib.request
-
-          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          payload = json.dumps({
-              "type": "publish.failed",
-              "jobId": os.environ["JOB_ID"],
-              "target": os.environ["TARGET"],
-              "error": "publish workflow failed",
-          }, separators=(",", ":")).encode("utf-8")
-          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-          request = urllib.request.Request(url, data=payload, method="POST")
-          request.add_header("content-type", "application/json")
-          request.add_header("x-deadzone-signature", signature)
-          with urllib.request.urlopen(request, timeout=15) as response:
-              response.read()
+      - name: "Upload job log bundle"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: superinspector-logs-${{ inputs.job_id }}
+          path: ${{ steps.workspace.outputs.ROOT }}/logs/
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,6 +1,6 @@
 name: MEZO-SuperInspector 4
 
-run-name: 🔬 SuperInspector 4 · ${{ inputs.job_id }} · ${{ inputs.profile_id }}
+run-name: "SuperInspector 4 - ${{ inputs.job_id }} - ${{ inputs.profile_id }}"
 
 concurrency:
   group: mezo-superinspector-4
@@ -10,37 +10,54 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: 🆔 DeadZone Super Inspector job ID
+        description: "DeadZone Super Inspector job ID"
         required: true
         type: string
-      profile_object_key:
-        description: 📦 Canonical profile R2 object key
+      rom_url:
+        description: "HTTP(S) URL of the Xiaomi Fastboot ROM archive"
         required: true
         type: string
-      inspector_commit:
-        description: 🔒 Pinned DeadZone-SuperInspector commit SHA
+      original_filename:
+        description: "Original ROM filename (optional)"
+        required: false
+        type: string
+        default: ""
+      inspector_ref:
+        description: "Pinned DeadZone-SuperInspector commit SHA"
+        required: true
+        type: string
+      target_repo:
+        description: "Repository slug that owns this run"
         required: true
         type: string
       profile_id:
-        description: 🪪 Canonical profile ID
+        description: "Pre-allocated 16-hex profile ID (idempotency key)"
         required: true
         type: string
       callback_url:
-        description: 🔗 Signed DeadZone callback URL
+        description: "Signed DeadZone callback URL"
         required: true
         type: string
+      max_rom_bytes:
+        description: "Hard cap for ROM download"
+        required: false
+        type: number
+        default: 4294967296
 
 permissions:
   contents: read
 
 jobs:
-  publish:
-    name: 🚀 SuperInspector Worker 4
+  superinspector:
+    name: "SuperInspector Worker 4"
     uses: ./.github/workflows/superinspector-core.yml
     with:
       job_id: ${{ inputs.job_id }}
-      profile_object_key: ${{ inputs.profile_object_key }}
-      inspector_commit: ${{ inputs.inspector_commit }}
+      rom_url: ${{ inputs.rom_url }}
+      original_filename: ${{ inputs.original_filename }}
+      inspector_ref: ${{ inputs.inspector_ref }}
+      target_repo: ${{ inputs.target_repo }}
       profile_id: ${{ inputs.profile_id }}
       callback_url: ${{ inputs.callback_url }}
+      max_rom_bytes: ${{ inputs.max_rom_bytes }}
     secrets: inherit
