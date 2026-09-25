@@ -1,0 +1,259 @@
+name: MEZO-SuperInspector Core
+
+on:
+  workflow_call:
+    inputs:
+      job_id:
+        description: 🆔 DeadZone Super Inspector job ID
+        required: true
+        type: string
+      profile_object_key:
+        description: 📦 Canonical profile R2 object key
+        required: true
+        type: string
+      inspector_commit:
+        description: 🔒 Pinned DeadZone-SuperInspector commit SHA
+        required: true
+        type: string
+      profile_id:
+        description: 🪪 Canonical profile ID
+        required: true
+        type: string
+      callback_url:
+        description: 🔗 Signed DeadZone callback URL
+        required: true
+        type: string
+    secrets:
+      SUPER_INSPECTOR_REPOSITORY_TOKEN:
+        required: false
+      CLOUDFLARE_R2_ACCESS_KEY:
+        required: true
+      CLOUDFLARE_R2_SECRET_KEY:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      CLOUDFLARE_R2_BUCKET:
+        required: true
+      DEADZONE_CALLBACK_SECRET:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: 🚀 Publish Super Profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEADZONE_JOB_ID: ${{ inputs.job_id }}
+      DEADZONE_PROFILE_OBJECT_KEY: ${{ inputs.profile_object_key }}
+      DEADZONE_PROFILE_ID: ${{ inputs.profile_id }}
+      DEADZONE_INSPECTOR_COMMIT: ${{ inputs.inspector_commit }}
+      DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+      DEADZONE_CALLBACK_SECRET: ${{ secrets.DEADZONE_CALLBACK_SECRET }}
+      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
+      R2_SECRET_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_KEY }}
+      R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+      R2_ENDPOINT: ${{ format('https://{0}.r2.cloudflarestorage.com', secrets.CLOUDFLARE_ACCOUNT_ID) }}
+    steps:
+      - name: 🧾 Validate publish inputs
+        shell: python
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          PROFILE_OBJECT_KEY: ${{ inputs.profile_object_key }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          INSPECTOR_COMMIT: ${{ inputs.inspector_commit }}
+        run: |
+          import os
+          import re
+
+          for name in ("JOB_ID", "PROFILE_OBJECT_KEY", "PROFILE_ID", "INSPECTOR_COMMIT"):
+              value = os.environ[name].strip()
+              if not value:
+                  raise SystemExit(f"{name} must not be empty")
+              if len(value) > 256:
+                  raise SystemExit(f"{name} too long")
+          if not re.fullmatch(r"[A-Za-z0-9._/-]+", os.environ["PROFILE_OBJECT_KEY"]):
+              raise SystemExit("PROFILE_OBJECT_KEY contains forbidden characters")
+          if not re.fullmatch(r"[a-f0-9]{7,64}", os.environ["INSPECTOR_COMMIT"]):
+              raise SystemExit("INSPECTOR_COMMIT must be a hex SHA")
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 📥 Download canonical profile from R2
+        shell: python
+        run: |
+          import os
+          import sys
+          import boto3
+          from botocore.config import Config
+
+          endpoint = os.environ["R2_ENDPOINT"]
+          bucket = os.environ["R2_BUCKET"]
+          key = os.environ["DEADZONE_PROFILE_OBJECT_KEY"]
+          out = os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json")
+
+          client = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=os.environ["R2_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["R2_SECRET_KEY"],
+              config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+          )
+          client.download_file(bucket, key, out)
+          size = os.path.getsize(out)
+          if size <= 0 or size > 16 * 1024 * 1024:
+              raise SystemExit(f"profile object size out of range: {size}")
+          print(f"Downloaded {key} → {out} ({size} bytes)")
+
+      - name: 🔏 Compute profile hash
+        shell: python
+        run: |
+          import hashlib
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json"))
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          os.environ["DEADZONE_PROFILE_SHA256"] = digest
+          with open("profile.sha256", "w", encoding="utf-8") as handle:
+              handle.write(digest + "\n")
+          print("profile_sha256 =", digest)
+
+      - name: 📤 Report publish start
+        shell: python
+        env:
+          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          TARGET: ${{ github.repository }}
+        run: |
+          import hashlib
+          import hmac
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          payload = json.dumps({
+              "type": "publish.started",
+              "jobId": os.environ["JOB_ID"],
+              "target": os.environ["TARGET"],
+          }, separators=(",", ":")).encode("utf-8")
+          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+          request = urllib.request.Request(url, data=payload, method="POST")
+          request.add_header("content-type", "application/json")
+          request.add_header("x-deadzone-signature", signature)
+          with urllib.request.urlopen(request, timeout=15) as response:
+              response.read()
+          print("publish.started delivered")
+
+      - name: 🔁 Refresh target checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📚 Materialise canonical profile under profiles/super/<id>/
+        shell: python
+        env:
+          PROFILE_ID: ${{ inputs.profile_id }}
+        run: |
+          import json
+          import os
+          import pathlib
+          import shutil
+
+          source = pathlib.Path(os.environ.get("DEADZONE_PROFILE_LOCAL", "profile.json"))
+          profile = json.loads(source.read_text(encoding="utf-8"))
+          device = profile.get("device", {}).get("primary_codename") or profile.get("profile_id", "device")
+          target_dir = pathlib.Path("profiles/super") / device / os.environ["PROFILE_ID"]
+          target_dir.mkdir(parents=True, exist_ok=True)
+          shutil.copy(source, target_dir / "device.profile.json")
+          (target_dir / "INSPECTOR_COMMIT").write_text(
+              os.environ.get("DEADZONE_INSPECTOR_COMMIT", "") + "\n",
+              encoding="utf-8",
+          )
+          (target_dir / "PROFILE_SHA256").write_text(
+              os.environ.get("DEADZONE_PROFILE_SHA256", "") + "\n",
+              encoding="utf-8",
+          )
+
+      - name: 📝 Commit profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "deadzone-bot"
+          git config user.email "bot@deadzone.local"
+          git add profiles/super
+          if git diff --cached --quiet; then
+              echo "No changes to commit"
+          else
+              git commit -m "super(profile): ${{ inputs.profile_id }} via ${{ inputs.inspector_commit }}"
+              git push
+          fi
+
+      - name: 📣 Report publish.completed
+        if: success()
+        shell: python
+        env:
+          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          TARGET: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          import hashlib
+          import hmac
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          payload = json.dumps({
+              "type": "publish.completed",
+              "jobId": os.environ["JOB_ID"],
+              "target": os.environ["TARGET"],
+              "commitSha": os.environ["COMMIT_SHA"],
+              "profileId": os.environ.get("DEADZONE_PROFILE_ID", ""),
+          }, separators=(",", ":")).encode("utf-8")
+          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+          request = urllib.request.Request(url, data=payload, method="POST")
+          request.add_header("content-type", "application/json")
+          request.add_header("x-deadzone-signature", signature)
+          with urllib.request.urlopen(request, timeout=15) as response:
+              response.read()
+
+      - name: 📣 Report publish.failed
+        if: failure()
+        shell: python
+        env:
+          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          TARGET: ${{ github.repository }}
+        run: |
+          import hashlib
+          import hmac
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["DEADZONE_CALLBACK_URL"].strip()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          payload = json.dumps({
+              "type": "publish.failed",
+              "jobId": os.environ["JOB_ID"],
+              "target": os.environ["TARGET"],
+              "error": "publish workflow failed",
+          }, separators=(",", ":")).encode("utf-8")
+          signature = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+          request = urllib.request.Request(url, data=payload, method="POST")
+          request.add_header("content-type", "application/json")
+          request.add_header("x-deadzone-signature", signature)
+          with urllib.request.urlopen(request, timeout=15) as response:
+              response.read()

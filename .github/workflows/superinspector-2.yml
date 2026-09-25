@@ -1,0 +1,46 @@
+name: MEZO-SuperInspector 2
+
+run-name: 🔬 SuperInspector 2 · ${{ inputs.job_id }} · ${{ inputs.profile_id }}
+
+concurrency:
+  group: mezo-superinspector-2
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 🆔 DeadZone Super Inspector job ID
+        required: true
+        type: string
+      profile_object_key:
+        description: 📦 Canonical profile R2 object key
+        required: true
+        type: string
+      inspector_commit:
+        description: 🔒 Pinned DeadZone-SuperInspector commit SHA
+        required: true
+        type: string
+      profile_id:
+        description: 🪪 Canonical profile ID
+        required: true
+        type: string
+      callback_url:
+        description: 🔗 Signed DeadZone callback URL
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: 🚀 SuperInspector Worker 2
+    uses: ./.github/workflows/superinspector-core.yml
+    with:
+      job_id: ${{ inputs.job_id }}
+      profile_object_key: ${{ inputs.profile_object_key }}
+      inspector_commit: ${{ inputs.inspector_commit }}
+      profile_id: ${{ inputs.profile_id }}
+      callback_url: ${{ inputs.callback_url }}
+    secrets: inherit
