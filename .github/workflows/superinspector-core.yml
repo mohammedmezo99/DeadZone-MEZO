@@ -47,8 +47,16 @@ on:
         required: false
       DEADZONE_CALLBACK_SECRET:
         required: true
-      GITHUB_TOKEN:
-        required: true
+      # GITHUB_TOKEN is intentionally NOT declared here. GitHub
+      # rejects reserved secret names (`GITHUB_TOKEN`) inside the
+      # `workflow_call.secrets` interface with HTTP 422 "secret name
+      # GITHUB_TOKEN within workflow_call can not be used". The
+      # built-in token is auto-injected on every workflow run and
+      # remains accessible via `${{ secrets.GITHUB_TOKEN }}` inside
+      # the steps below - no explicit declaration is needed. The
+      # `permissions: contents: write` block below grants the
+      # auto-injected token the write scope it needs for the
+      # publish step.
 
 permissions:
   contents: write
