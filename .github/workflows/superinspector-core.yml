@@ -35,7 +35,7 @@ on:
       max_rom_bytes:
         description: "Hard cap for ROM download in bytes"
         required: false
-        type: number
+        type: string
         default: 4294967296  # 4 GiB
       downloads_root:
         description: "Directory inside the runner where ROMs and profiles live"
