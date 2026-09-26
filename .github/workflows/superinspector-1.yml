@@ -45,7 +45,17 @@ on:
         default: 4294967296
 
 permissions:
-  contents: read
+  # The reusable workflow superinspector-core.yml declares
+  # `permissions: contents: write` at the workflow level. When a
+  # caller does `uses: ./.../superinspector-core.yml`, GitHub
+  # Actions enforces that the caller's granted scope is at least
+  # as broad as the callee's declared scope. Otherwise the file
+  # is rejected at parse time with HTTP 422 / "Invalid workflow
+  # file" + "The workflow '...' is requesting 'contents: write',
+  # but is only allowed 'contents: read'." Declaring `contents:
+  # write` here lets the GITHUB_TOKEN inherited via
+  # `secrets: inherit` perform the publish step.
+  contents: write
 
 jobs:
   superinspector:
