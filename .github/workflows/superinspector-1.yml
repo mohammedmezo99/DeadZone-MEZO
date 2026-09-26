@@ -69,5 +69,5 @@ jobs:
       target_repo: ${{ inputs.target_repo }}
       profile_id: ${{ inputs.profile_id }}
       callback_url: ${{ inputs.callback_url }}
-      max_rom_bytes: ${{ inputs.max_rom_bytes | int }}
+      max_rom_bytes: ${{ inputs.max_rom_bytes }}
     secrets: inherit
