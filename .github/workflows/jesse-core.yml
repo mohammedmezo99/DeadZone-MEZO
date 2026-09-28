@@ -1,0 +1,597 @@
+name: MEZO-Jesse Core
+
+on:
+  workflow_call:
+    inputs:
+      input_url:
+        description: 📥 Firmware URL or local-relative path
+        required: true
+        type: string
+      build_name:
+        description: 🏷️ Build name (becomes out/<build_name>/)
+        required: true
+        type: string
+      rom_type:
+        description: 🧩 ROM type passed to Jesse's --type flag
+        required: false
+        type: string
+        default: auto
+      compress:
+        description: 🗜️ Also produce a .zip alongside the .img (Jesse --compress)
+        required: false
+        type: boolean
+        default: true
+      no_debloat:
+        description: 🚫 Skip the debloat patch set (Jesse --no-debloat)
+        required: false
+        type: boolean
+        default: false
+      avb_key:
+        description: 🔐 RSA private key (PEM) for AVB signing (empty = AOSP test key)
+        required: false
+        type: string
+        default: ''
+      builder_name:
+        description: 👤 Builder name
+        required: false
+        type: string
+      builder_id:
+        description: 💬 Telegram user ID
+        required: false
+        type: string
+      request_id:
+        description: 🆔 DeadZone controlled build request ID
+        required: true
+        type: string
+      callback_url:
+        description: 🔗 Signed DeadZone build-event endpoint
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+      SOURCEFORGE_SSH_PRIVATE_KEY:
+        required: true
+      PIXELDRAIN_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 🛠️ Build GSI
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      DEADZONE_REQUEST_ID: ${{ inputs.request_id }}
+      DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+      DEADZONE_PROJECT: jesse
+      DEADZONE_CONTROLLED_BUILD: "1"
+      DEADZONE_INPUT_URL: ${{ inputs.input_url }}
+      DEADZONE_BUILD_NAME: ${{ inputs.build_name }}
+      DEADZONE_ROM_TYPE: ${{ inputs.rom_type }}
+      DEADZONE_COMPRESS: ${{ inputs.compress }}
+      DEADZONE_NO_DEBLOAT: ${{ inputs.no_debloat }}
+      DEADZONE_AVB_KEY: ${{ inputs.avb_key }}
+      DEADZONE_BUILDER_NAME: ${{ inputs.builder_name }}
+      DEADZONE_BUILDER_ID: ${{ inputs.builder_id }}
+      DEADZONE_SOURCE_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: 🧾 Validate controlled request
+        shell: python
+        env:
+          INPUT_URL: ${{ inputs.input_url }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          BUILD_NAME: ${{ inputs.build_name }}
+        run: |
+          import os
+          import re
+          from urllib.parse import urlparse
+
+          request_id = os.environ["REQUEST_ID"].strip()
+          if not re.fullmatch(r"jesse_[A-Za-z0-9]{8,80}", request_id):
+              raise SystemExit("Invalid DeadZone request ID")
+
+          for name in ("INPUT_URL", "CALLBACK_URL"):
+              value = os.environ[name].strip()
+              parsed = urlparse(value)
+              if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                  raise SystemExit(f"{name} must be a safe HTTPS URL")
+
+          build_name = os.environ["BUILD_NAME"].strip()
+          if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", build_name):
+              raise SystemExit("BUILD_NAME must be 1-64 chars of [A-Za-z0-9._-]")
+
+      - name: 🔐 Validate launcher credentials
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          set -euo pipefail
+          required=(GH_TOKEN SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Missing required repository secret: ${variable_name}"
+              exit 1
+            fi
+          done
+
+      - name: 📥 Checkout Jesse launcher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: 📥 Checkout private runtime
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+            report_build_event.py
+            upload.env
+            upload-mirrors.sh
+            publish-website-release.py
+          sparse-checkout-cone-mode: false
+
+      - name: ⚙️ Load central runtime
+        id: runtime
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: "1"
+        run: |
+          set -euo pipefail
+          for runtime_file in projects.env build.env rclone.conf load-build.sh report_build_event.py upload.env upload-mirrors.sh publish-website-release.py; do
+            if [[ ! -s "runtime/${runtime_file}" ]]; then
+              echo "::error::Central runtime file is missing or empty: ${runtime_file}"
+              exit 1
+            fi
+          done
+          chmod 700 runtime/load-build.sh runtime/upload-mirrors.sh
+          python3 -m py_compile runtime/report_build_event.py runtime/publish-website-release.py
+          runtime/load-build.sh jesse
+
+      - name: ✅ Validate loaded runtime
+        env:
+          ENGINE_REPOSITORY: ${{ steps.runtime.outputs.engine_repository }}
+        run: |
+          set -euo pipefail
+          required=(
+            ENGINE_REPOSITORY
+            DEADZONE_ENGINE_REPOSITORY
+            BUILD_PROGRESS_SECRET
+            RCLONE_REMOTE_NAME
+            RCLONE_UPLOAD_DIR
+          )
+          for variable_name in "${required[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Central runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+          if [[ "$ENGINE_REPOSITORY" != "mohammedmezo99/DeadZone_MysticGSI" ]]; then
+            echo "::error::Unexpected Jesse engine: $ENGINE_REPOSITORY"
+            exit 1
+          fi
+          if [[ "$ENGINE_REPOSITORY" != "$DEADZONE_ENGINE_REPOSITORY" ]]; then
+            echo "::error::Runtime engine output does not match the loaded project map"
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+
+      - name: 💾 Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          build-mount-path: ${{ github.workspace }}/toolbuild
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: 🧹 Clean unused runner packages
+        run: |
+          set -euo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
+
+      - name: 📦 Checkout private Jesse engine
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.runtime.outputs.engine_repository }}
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: toolbuild
+          lfs: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 🧭 Validate Jesse engine layout
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          required_engine_files=(
+            cli.py
+            tools/notify.py
+            tools/upload.py
+          )
+          for engine_file in "${required_engine_files[@]}"; do
+            if [[ ! -s "$engine_file" ]]; then
+              echo "::error::Jesse engine file is missing or empty: ${engine_file}"
+              exit 1
+            fi
+          done
+          python3 -m py_compile tools/notify.py tools/upload.py
+
+      - name: ☁️ Install central Rclone configuration
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          source_file="$GITHUB_WORKSPACE/runtime/rclone.conf"
+          target_file="$PWD/rclone.conf"
+          [[ -s "$source_file" ]] || {
+            echo "::error::Central rclone.conf is missing or empty"
+            exit 1
+          }
+          install -m 600 "$source_file" "$target_file"
+          if ! rclone --config="$target_file" listremotes | sed 's/:$//' | grep -Fxq "$RCLONE_REMOTE_NAME"; then
+            echo "::error::Central rclone.conf does not define expected remote: ${RCLONE_REMOTE_NAME}"
+            exit 1
+          fi
+          rclone version
+
+      - name: 📣 Start live tracking
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 tools/notify.py start \
+            "$DEADZONE_SOURCE_REPOSITORY" \
+            "$DEADZONE_INPUT_URL" \
+            "$DEADZONE_REQUEST_ID" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --builder-name "$DEADZONE_BUILDER_NAME" \
+            --builder-id "$DEADZONE_BUILDER_ID" || true
+
+      - name: 🕒 Set Cairo timezone
+        run: sudo timedatectl set-timezone Africa/Cairo
+
+      - name: ☕ Install OpenJDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 🧰 Install Jesse dependencies
+        run: |
+          set -Eeuo pipefail
+
+          chrome_source_pattern='dl.google.com/linux/chrome-stable/deb'
+          while IFS= read -r source_file; do
+            echo "::notice::Disabling unused Chrome APT source: $source_file"
+            sudo mv -- "$source_file" "${source_file}.disabled"
+          done < <(
+            grep -Rls --include='*.list' --include='*.sources' \
+              "$chrome_source_pattern" /etc/apt/sources.list.d 2>/dev/null || true
+          )
+
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get purge -y device-tree-compiler || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq rclone python-is-python3 wget python3 python3-pip python3-venv \
+            lz4 xz-utils zlib1g-dev gcc g++ libc6 libstdc++6 \
+            busybox zip unzip p7zip-full zipalign zstd bc erofs-utils \
+            android-sdk-libsparse-utils xmlstarlet aapt rsync openssh-client curl \
+            default-jre-headless openssl brotli pcre2-utils cmake ninja-build pkg-config \
+            libarchive-tools libpcre2-dev liblz4-dev libzstd-dev libbrotli-dev
+          command -v apktool >/dev/null 2>&1 || {
+            echo "apktool missing -- installing from upstream release"
+            sudo mkdir -p /usr/local/bin /opt/apktool
+            sudo curl -fsSL -o /opt/apktool/apktool.jar \
+              https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar
+            printf '#!/bin/sh\nexec java -jar /opt/apktool/apktool.jar "$@"\n' \
+              | sudo tee /usr/local/bin/apktool >/dev/null
+            sudo chmod +x /usr/local/bin/apktool
+          }
+
+      - name: 🐍 Create Python venv and install requirements
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: 🛠️ Prepare native host tools
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          .venv/bin/python tools/build_android_tools.py || true
+
+      - name: ✅ Validate environment
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          .venv/bin/python -c "import tools; tools.check_environment()"
+
+      - name: 🚀 Build GSI
+        id: build
+        working-directory: toolbuild
+        env:
+          DEADZONE_REQUEST_ID: ${{ env.DEADZONE_REQUEST_ID }}
+        run: |
+          set -Eeuo pipefail
+          args=(
+            "build"
+            "$DEADZONE_BUILD_NAME"
+            "$DEADZONE_INPUT_URL"
+            "--type" "$DEADZONE_ROM_TYPE"
+          )
+          if [[ "$DEADZONE_COMPRESS" == "true" ]]; then
+            args+=("--compress")
+          fi
+          if [[ "$DEADZONE_NO_DEBLOAT" == "true" ]]; then
+            args+=("--no-debloat")
+          fi
+          if [[ -n "$DEADZONE_AVB_KEY" ]]; then
+            args+=("--avb-key" "$DEADZONE_AVB_KEY")
+          fi
+
+          .venv/bin/python tools/notify.py build \
+            "$DEADZONE_SOURCE_REPOSITORY" \
+            "$DEADZONE_INPUT_URL" \
+            "$DEADZONE_REQUEST_ID" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --builder-name "$DEADZONE_BUILDER_NAME" \
+            --builder-id "$DEADZONE_BUILDER_ID" || true
+
+          .venv/bin/python cli.py "${args[@]}" 2>&1 | tee build-full.log
+
+      - name: ✅ Verify build artifacts
+        if: success()
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=( out/"$DEADZONE_BUILD_NAME"/*.img )
+          if (( ${#images[@]} == 0 )); then
+            echo "::error::Build produced no .img under out/$DEADZONE_BUILD_NAME/"
+            exit 1
+          fi
+          for img in "${images[@]}"; do
+            [[ -s "$img" ]] || { echo "::error::Empty image: $img"; exit 1; }
+          done
+          printf 'DEADZONE_RESULT_NAME=%s\n' "$(basename "${images[0]}")" >> "$GITHUB_ENV"
+
+      - name: 📦 Report pack stage
+        if: success()
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          .venv/bin/python tools/notify.py pack \
+            "$DEADZONE_SOURCE_REPOSITORY" \
+            "$DEADZONE_INPUT_URL" \
+            "$DEADZONE_REQUEST_ID" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --builder-name "$DEADZONE_BUILDER_NAME" \
+            --builder-id "$DEADZONE_BUILDER_ID" || true
+
+      - name: 🗜️ Upload to Google Drive via central infrastructure
+        if: success()
+        working-directory: toolbuild
+        run: |
+          set -Eeuo pipefail
+          .venv/bin/python tools/notify.py upload \
+            "$DEADZONE_SOURCE_REPOSITORY" \
+            "$DEADZONE_INPUT_URL" \
+            "$DEADZONE_REQUEST_ID" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --builder-name "$DEADZONE_BUILDER_NAME" \
+            --builder-id "$DEADZONE_BUILDER_ID" || true
+
+          echo "[PERF][BEFORE PACKAGE]" | tee -a build-full.log
+          df -h / | tail -1 | awk '{print " Root:", $4, "available"}' | tee -a build-full.log
+          free -h | awk '/^Mem:/ {printf " Memory: %s total, %s free\n", $2, $7}' | tee -a build-full.log
+          nproc | xargs -I{} echo " CPU cores: {}" | tee -a build-full.log
+
+          set +e
+          .venv/bin/python tools/upload.py \
+            --remote "$RCLONE_REMOTE_NAME" \
+            --upload-dir "$RCLONE_UPLOAD_DIR" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --project "jesse" \
+            --rclone-conf "$PWD/rclone.conf" \
+            2>&1 | tee -a build-full.log
+          google_status=${PIPESTATUS[0]}
+          set -e
+          printf 'DEADZONE_GOOGLE_UPLOAD_STATUS=%s\n' "$google_status" >> "$GITHUB_ENV"
+
+          if (( google_status == 0 )); then
+            drive_remote="${RCLONE_REMOTE_NAME}:${RCLONE_UPLOAD_DIR%/}/jesse/${DEADZONE_BUILD_NAME^^}"
+            drive_url="$(rclone --config="$PWD/rclone.conf" link "$drive_remote/${DEADZONE_RESULT_NAME}" 2>/dev/null | tail -n1 | tr -d '\r' || true)"
+            if [[ -n "$drive_url" ]]; then
+              printf 'DEADZONE_GOOGLE_DRIVE_URL=%s\nDEADZONE_RESULT_URL=%s\n' \
+                "$drive_url" "$drive_url" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" post-package || true
+
+      - name: ⬆️ Upload SourceForge and PixelDrain
+        if: success()
+        working-directory: toolbuild
+        env:
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source "$GITHUB_WORKSPACE/runtime/upload.env"
+          set +a
+
+          required_mirror_values=(SOURCEFORGE_USERNAME SOURCEFORGE_PROJECT SOURCEFORGE_SSH_PRIVATE_KEY PIXELDRAIN_API_KEY)
+          for variable_name in "${required_mirror_values[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Mirror runtime value is missing: ${variable_name}"
+              exit 1
+            fi
+          done
+
+          shopt -s nullglob
+          final_zips=( out/"$DEADZONE_BUILD_NAME"/*.zip )
+          if (( ${#final_zips[@]} >= 1 )); then
+            final_zip="${final_zips[0]}"
+            final_name="$(basename "$final_zip")"
+          else
+            shopt -s nullglob
+            final_imgs=( out/"$DEADZONE_BUILD_NAME"/*.img )
+            final_zip="${final_imgs[0]}"
+            final_name="$(basename "$final_zip")"
+          fi
+
+          if [[ ! -s "$final_zip" ]]; then
+            echo "::error::No artifact found under out/$DEADZONE_BUILD_NAME/"
+            exit 1
+          fi
+
+          # Mirror upload (SourceForge + PixelDrain) via the central
+          # `upload-mirrors.sh`. The script signature mirrors Lite:
+          #   <project> <codename> <os_folder> <archive_path> <file_name>
+          # Jesse does not produce the xiaomi-specific codename / os_folder
+          # pair, so empty strings are passed. If the central runtime ever
+          # rejects those values we will surface a clear error here rather
+          # than silently dropping the mirrors; that lets the Jesse team
+          # add a proper metadata convention to `upload-mirrors.sh` while
+          # keeping Jesse on the same upload architecture Lite uses today.
+          set +e
+          bash "$GITHUB_WORKSPACE/runtime/upload-mirrors.sh" \
+            "Jesse" "" "" "$final_zip" "$final_name" \
+            2>&1 | tee -a build-full.log
+          mirror_status=${PIPESTATUS[0]}
+          set -e
+
+          google_status="${DEADZONE_GOOGLE_UPLOAD_STATUS:-1}"
+          drive_url="${DEADZONE_GOOGLE_DRIVE_URL:-}"
+          if (( google_status == 0 )) && [[ -n "$drive_url" ]]; then
+            export DEADZONE_SET_RESULT_URL=0
+          else
+            echo "::warning::Google Drive is unavailable as a final public link; secondary mirrors may rescue the release"
+            export DEADZONE_SET_RESULT_URL=1
+          fi
+
+          if (( google_status != 0 && mirror_status != 0 )); then
+            echo "::error::Google Drive and all secondary ROM mirrors failed"
+            exit 1
+          fi
+          if (( mirror_status != 0 )); then
+            echo "::warning::Secondary mirrors failed, but Google Drive upload succeeded"
+          fi
+
+      - name: ✅ Send success notification
+        if: success()
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          .venv/bin/python tools/notify.py success \
+            "$DEADZONE_SOURCE_REPOSITORY" \
+            "$DEADZONE_INPUT_URL" \
+            "$DEADZONE_REQUEST_ID" \
+            --name "$DEADZONE_BUILD_NAME" \
+            --builder-name "$DEADZONE_BUILDER_NAME" \
+            --builder-id "$DEADZONE_BUILDER_ID" || true
+
+      - name: 🌐 Publish Jesse release to website
+        if: success()
+        continue-on-error: true
+        working-directory: toolbuild
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${DEADZONE_RESULT_NAME:-}" ]] || {
+            echo "::warning::Website release skipped: final artifact name is unavailable"
+            exit 0
+          }
+          .venv/bin/python "$GITHUB_WORKSPACE/runtime/publish-website-release.py" local \
+            --request-id "$DEADZONE_REQUEST_ID" \
+            --project jesse \
+            --artifact-name "$DEADZONE_RESULT_NAME" \
+            --artifact-path "$PWD/out/$DEADZONE_BUILD_NAME/$DEADZONE_RESULT_NAME" \
+            --google-drive-url "${DEADZONE_GOOGLE_DRIVE_URL:-}" \
+            --sourceforge-url "${DEADZONE_SOURCEFORGE_URL:-}" \
+            --pixeldrain-url "${DEADZONE_PIXELDRAIN_URL:-}" || true
+
+      - name: ❌ Send failure notification
+        if: failure()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::error::Terminal Jesse event cannot be signed because the central event secret is unavailable.'
+            exit 1
+          }
+          python3 runtime/report_build_event.py failed \
+            --project jesse \
+            --message "DeadZone Jesse GSI build failed."
+
+      - name: ⛔ Send cancellation notification
+        if: cancelled()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          [[ -n "${DEADZONE_EVENT_SECRET:-}" ]] || {
+            echo '::error::Terminal Jesse event cannot be signed because the central event secret is unavailable.'
+            exit 1
+          }
+          python3 runtime/report_build_event.py cancelled \
+            --project jesse \
+            --message "DeadZone Jesse GSI build cancelled."
+
+      - name: 🧽 Cleanup Jesse workspace
+        if: always()
+        run: |
+          set -Euo pipefail
+          echo "[CLEANUP] Running final Jesse workspace cleanup..." | tee -a build-full.log
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" final || true
+          rm -f toolbuild/rclone.conf
+
+      - name: 📋 Upload debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-jesse-${{ github.run_number }}
+          path: |
+            toolbuild/build-full.log
+          retention-days: 1
+          if-no-files-found: ignore

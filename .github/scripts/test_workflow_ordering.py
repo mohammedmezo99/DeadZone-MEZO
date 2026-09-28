@@ -15,6 +15,7 @@ WORKFLOWS_WITH_TERMINAL_REPORTING = [
     "port-oxygenos.yml",
     "port-realmeui.yml",
     "lite-core.yml",
+    "jesse-core.yml",
     "custom-ninja.yml",
     "custom-legend.yml",
     "custom-gamingplus.yml",
