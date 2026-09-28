@@ -173,7 +173,20 @@ jobs:
         with:
           build-mount-path: ${{ github.workspace }}/toolbuild
           swap-size-mb: 1024
-          root-reserve-mb: 512
+          # ── root-reserve-mb must leave room for the runner's own writes ──
+          #
+          # This action does not add capacity: it moves the existing root disk
+          # into an LVM loop device and re-mounts the build directory there.
+          # It calls fallocate() on /pv.img (root) AND /mnt/tmp-pv.img, and on
+          # a GitHub runner /mnt lives on the SAME /dev/root filesystem, so
+          # BOTH sparse images are charged against root. In run 36417133938
+          # root had 86G free and the action left it at 100M free / 100% full.
+          #
+          # root-reserve-mb is subtracted from root free space BEFORE the loop
+          # image is sized, so it is the ONLY knob that keeps the runner itself
+          # writable. The build also writes outside toolbuild (Java, pip/gradle
+          # caches, /tmp, rclone temp uploads, apt), so 512MB was not enough.
+          root-reserve-mb: 20000
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
@@ -194,21 +207,36 @@ jobs:
           #   stock ZIP + port ZIP + both extracted trees + reconstructed
           #   partition .img files + super.img workspace + final ZIP.
           #
-          # Measured on run 36417133938: the stock OTA is ~7 GiB and the
-          # ColorOS ota_full is ~10 GiB. Holding both ZIPs *and* both
-          # extracted trees *and* the reconstructed images needs ~68 GiB peak
-          # with no cleanup, which is what exhausted the runner and caused the
-          # false "missing source" cascade for my_stock / my_heytap / odm.
+          # Measured on run 36417133938: stock OTA ~7 GiB, ColorOS ota_full
+          # ~10 GiB. Holding both ZIPs *and* both extracted trees *and* every
+          # reconstructed image peaks near 68 GiB with no cleanup, which is
+          # what exhausted the runner and produced the false "missing source"
+          # cascade for my_stock / my_heytap / odm.
           #
-          # The engine now deletes each role archive as soon as its extracted
-          # tree is materialised (cleanup_role_archive) and prunes .oplus-work
-          # per partition, which drops the sustained peak by roughly the size
-          # of the two archives. We require that reduced peak plus headroom.
-          required_kb=$((72 * 1024 * 1024))
-          safety_label="72 GiB (2-ROM ColorOS peak incl. super.img + headroom)"
+          # Two hard constraints set this number:
+          #
+          #   1. The runner has 145 GiB total and ~86 GiB free before the
+          #      space action runs. maximize-build-space does not add space,
+          #      it repartitions that same disk, and root-reserve-mb is held
+          #      back for the runner's own writes. So the build volume is
+          #      roughly (86 - reserve) GiB -- it CANNOT be made arbitrarily
+          #      large, which is why "just ask for more disk" is not an option.
+          #   2. The engine now deletes each role archive the moment its
+          #      extracted tree is materialised (cleanup_role_archive) and
+          #      prunes .oplus-work per partition, plus the workflow reclaims
+          #      the consumed source trees before packaging. That removes
+          #      roughly the size of both archives from the sustained peak.
+          #
+          # 56 GiB is the cleaned peak plus headroom, and it fits inside the
+          # ~64 GiB usable build volume that root-reserve-mb: 20000 yields.
+          # Requesting the uncleaned 68 GiB would always fail the gate, so the
+          # threshold and the cleanup strategy are deliberately coupled.
+          required_kb=$((56 * 1024 * 1024))
+          safety_label="56 GiB (cleaned 2-ROM ColorOS peak + super.img + packaging headroom)"
 
           available_kb="$(df -Pk "$mount_path" | awk 'NR == 2 {print $4}')"
           total_kb="$(df -Pk "$mount_path" | awk 'NR == 2 {print $2}')"
+          root_avail_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
           mount_src="$(findmnt -n -o SOURCE --target "$mount_path" 2>/dev/null || echo unknown)"
 
           echo "::group::Build storage report"
@@ -218,10 +246,31 @@ jobs:
           echo "  Volume available: $((available_kb / 1024 / 1024)) GiB"
           echo "  Required        : $((required_kb / 1024 / 1024)) GiB"
           echo "  Rationale       : $safety_label"
+          echo "  Root available  : $((root_avail_kb / 1024 / 1024)) GiB (runner + toolchains)"
           echo "  Stock ROM       : ${STOCK_ROM_URL%%\?*}"
           echo "  Port ROM        : ${PORT_ROM_URL%%\?*}"
           echo "::endgroup::"
           df -h "$mount_path"
+
+          # ── The failure that actually happened in run 36417133938 ────────
+          #
+          # The build volume looked fine (102G) while / itself sat at
+          # 100M / 100% full, because both loop PV images are charged to the
+          # root filesystem. Everything that is NOT inside toolbuild then
+          # fails to write: Java, gradle/pip caches, /tmp, rclone uploads.
+          # That is the condition to catch here, before a multi-hour download.
+          root_min_kb=$((3 * 1024 * 1024))
+          if (( root_avail_kb < root_min_kb )); then
+            {
+              echo "::error title=Root filesystem exhausted::Cause: INSUFFICIENT_DISK_SPACE"
+              echo "Root available: $((root_avail_kb / 1024 / 1024)) GiB"
+              echo "Required: 3 GiB for toolchains, caches and uploads outside toolbuild"
+              echo "maximize-build-space charged its loop PV images to /; raise root-reserve-mb."
+            } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+            echo "::error::Root filesystem has only $((root_avail_kb / 1024 / 1024)) GiB free after disk expansion; need 3 GiB for toolchains and uploads. Increase root-reserve-mb."
+            df -h /
+            exit 1
+          fi
 
           if (( available_kb < required_kb )); then
             {
