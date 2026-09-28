@@ -198,7 +198,14 @@ jobs:
           # and upload staging outside toolbuild.
           overprovision-lvm: "true"
           root-reserve-mb: 12000
-          temp-reserve-mb: 12000
+          # temp-reserve-mb must stay comfortably BELOW the free space on /mnt.
+          # /mnt is a directory on /dev/root, so TMP_FREE_KB is the same ~86 GiB
+          # pool that ROOT_LVM_SIZE is drawn from. Over-reserving here made the
+          # expression `TMP_FREE_KB - TMP_RESERVE_KB` go invalid and the action
+          # aborted with "fallocate: invalid length value specified" (run
+          # 36430055490). 2000 keeps the /mnt image just under the real pool so
+          # the two sparse images cannot jointly over-commit the disk.
+          temp-reserve-mb: 2000
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
