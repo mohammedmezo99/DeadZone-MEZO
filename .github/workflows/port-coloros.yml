@@ -181,16 +181,67 @@ jobs:
 
       - name: 💾 Verify build storage
         shell: bash
+        env:
+          STOCK_ROM_URL: ${{ inputs.stock_rom_url }}
+          PORT_ROM_URL: ${{ inputs.port_rom_url }}
         run: |
           set -Eeuo pipefail
           mount_path="$GITHUB_WORKSPACE/toolbuild"
+
+          # ── Measured requirement, not an arbitrary constant ──────────────
+          #
+          # The ColorOS two-ROM build holds, at peak:
+          #   stock ZIP + port ZIP + both extracted trees + reconstructed
+          #   partition .img files + super.img workspace + final ZIP.
+          #
+          # Measured on run 36417133938: the stock OTA is ~7 GiB and the
+          # ColorOS ota_full is ~10 GiB. Holding both ZIPs *and* both
+          # extracted trees *and* the reconstructed images needs ~68 GiB peak
+          # with no cleanup, which is what exhausted the runner and caused the
+          # false "missing source" cascade for my_stock / my_heytap / odm.
+          #
+          # The engine now deletes each role archive as soon as its extracted
+          # tree is materialised (cleanup_role_archive) and prunes .oplus-work
+          # per partition, which drops the sustained peak by roughly the size
+          # of the two archives. We require that reduced peak plus headroom.
+          required_kb=$((72 * 1024 * 1024))
+          safety_label="72 GiB (2-ROM ColorOS peak incl. super.img + headroom)"
+
           available_kb="$(df -Pk "$mount_path" | awk 'NR == 2 {print $4}')"
-          required_kb=$((30 * 1024 * 1024))
+          total_kb="$(df -Pk "$mount_path" | awk 'NR == 2 {print $2}')"
+          mount_src="$(findmnt -n -o SOURCE --target "$mount_path" 2>/dev/null || echo unknown)"
+
+          echo "::group::Build storage report"
+          echo "  Mount path      : $mount_path"
+          echo "  Mount source    : $mount_src"
+          echo "  Volume total    : $((total_kb / 1024 / 1024)) GiB"
+          echo "  Volume available: $((available_kb / 1024 / 1024)) GiB"
+          echo "  Required        : $((required_kb / 1024 / 1024)) GiB"
+          echo "  Rationale       : $safety_label"
+          echo "  Stock ROM       : ${STOCK_ROM_URL%%\?*}"
+          echo "  Port ROM        : ${PORT_ROM_URL%%\?*}"
+          echo "::endgroup::"
           df -h "$mount_path"
+
           if (( available_kb < required_kb )); then
-            echo "::error::Insufficient build storage: need at least 30 GiB free before ROM extraction; available $((available_kb / 1024 / 1024)) GiB"
+            {
+              echo "::error title=Insufficient build storage::Cause: INSUFFICIENT_DISK_SPACE"
+              echo "Required: $((required_kb / 1024 / 1024)) GiB"
+              echo "Available: $((available_kb / 1024 / 1024)) GiB"
+              echo "Mount: $mount_src"
+              echo "The ColorOS two-ROM reconstruction cannot complete without this headroom."
+            } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+            echo "::error::Insufficient build storage: need $((required_kb / 1024 / 1024)) GiB free before ROM extraction; available $((available_kb / 1024 / 1024)) GiB on $mount_src"
             exit 1
           fi
+
+          # Persist the measured headroom so the engine can size its own
+          # preflight against reality instead of a hard-coded guess.
+          {
+            echo "DEADZONE_STORAGE_AVAILABLE_KB=$available_kb"
+            echo "DEADZONE_STORAGE_MOUNT=$mount_src"
+          } >> "$GITHUB_ENV"
+          echo "Build storage verified: $((available_kb / 1024 / 1024)) GiB free on $mount_src"
 
       - name: 📥 Checkout private Port engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -261,6 +312,43 @@ jobs:
             "$DEADZONE_BUILDER_NAME" \
             "$DEADZONE_BUILDER_ID" \
             2>&1 | tee build_action.log
+
+      - name: 🧹 Reclaim disk after reconstruction
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # build.sh already deletes each role archive as soon as its extracted
+          # tree is materialised. This is the workflow-level safety net for
+          # whatever the engine could not release, and it runs before the
+          # packaging stage so the final ZIP has room to be written.
+          bash "$GITHUB_WORKSPACE/.github/scripts/runner-cleanup.sh" post-extract || true
+
+      - name: 📊 Report storage + failure cause
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mount_path="$GITHUB_WORKSPACE/toolbuild"
+          echo "::group::Storage report after reconstruction"
+          df -h "$mount_path" || true
+          echo "::endgroup::"
+
+          if [[ -f "$GITHUB_WORKSPACE/toolbuild/.deadzone-failure-code" ]]; then
+            code="$(tr -d '\r\n' < "$GITHUB_WORKSPACE/toolbuild/.deadzone-failure-code")"
+            echo "DeadZone failure class: $code"
+            case "$code" in
+              storage_exhausted)
+                echo "::error title=INSUFFICIENT_DISK_SPACE::The runner ran out of disk during partition reconstruction. The reported 'missing source' partitions were a consequence of storage exhaustion, not of an absent ROM."
+                ;;
+              partition_source_missing)
+                echo "::error title=PARTITION_SOURCE_MISSING::A partition source is genuinely absent from the ROM package."
+                ;;
+            esac
+            printf 'DEADZONE_ERROR_CODE=%s\n' "$code" >> "$GITHUB_ENV"
+          else
+            echo "No engine-level failure class recorded (build may have succeeded)."
+          fi
 
       - name: 📦 Pack Port ROM
         working-directory: toolbuild

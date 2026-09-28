@@ -14,6 +14,7 @@
 # Modes:
 #   bootstrap    - Initial runner setup cleanup (pre-build)
 #   pre-build    - Cleanup before ROM build starts
+#   post-extract - Cleanup after partition reconstruction, before packaging
 #   pre-package  - Cleanup before packaging stage
 #   post-package - Cleanup after final ZIP is created (preserves final ZIP)
 #   final        - Final cleanup (always runs, on success/failure/cancel)
@@ -56,6 +57,47 @@ run_cmd() {
     else
         "$@"
     fi
+}
+
+# Privileged removal helper.
+#
+# A bare `rm -rf` under `run_cmd ... || true` silently does nothing when sudo
+# is unavailable or fails, which is precisely the condition that leaves the
+# runner at ~1.9G during packaging. This wrapper escalates to sudo only when it
+# is genuinely needed (target is root-owned, or the current user cannot write to
+# the parent directory), and it reports deletions that were requested but did not
+# take effect, so a no-op cleanup is never mistaken for a successful one.
+rm_reclaim() {
+    local target="$1"
+    local desc="${2:-path}"
+
+    if [[ ! -e "$target" ]]; then
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo "[DRY-RUN] Would remove: $desc ($target)"
+        return 0
+    fi
+
+    if rm -rf "$target" 2>/dev/null; then
+        log_info "Reclaimed: $desc"
+        if [[ -e "$target" ]]; then
+            log_warn "Reclaim reported success but path still exists: $target"
+        fi
+        return 0
+    fi
+
+    # Plain rm failed (read-only fs, root-owned files, immutable attrs).
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo rm -rf "$target" 2>/dev/null; then
+            log_info "Reclaimed (sudo): $desc"
+            return 0
+        fi
+    fi
+
+    log_error "Failed to reclaim: $desc ($target)"
+    return 1
 }
 
 # Check available disk space
@@ -116,6 +158,45 @@ cleanup_pre_build() {
     run_cmd sudo rm -rf "$ENGINE_BUILD_DIR"/* 2>/dev/null || true
 
     log_info "Pre-build cleanup completed"
+}
+
+# Post-extract cleanup: Runs after build.sh has reconstructed every partition
+# and before packROM.sh produces the final ZIP.
+#
+# Rationale (from run 36417133938): after reconstruction the runner is holding
+# stockrom/images + portrom/images + baserom/images + super.img workspace. The
+# two source role trees are consumed by the time packROM.sh runs, so freeing
+# them here lowers the peak disk during the packaging + upload phase, which is
+# exactly where the runner reported "Root: 1.9G available".
+cleanup_post_extract() {
+    log_info "Running post-extract cleanup..."
+
+    log_info "Disk space before post-extract cleanup:"
+    report_disk
+
+    # Source role trees are fully consumed by merge.sh (it copies the final
+    # images into baserom/images). Only .port_state runtime metadata is needed.
+    for role in stockrom portrom; do
+        rm_reclaim "$ENGINE_BUILD_DIR/$role" "consumed source tree: build/$role"
+    done
+
+    # Any leftover OPlus working directory from reconstruction. The work tree is
+    # scratch, but its parent role directory must survive, hence the depth guard.
+    if [[ -d "$ENGINE_BUILD_DIR" ]]; then
+        local oplus_work
+        while IFS= read -r oplus_work; do
+            [[ -n "$oplus_work" ]] || continue
+            rm_reclaim "$oplus_work" "OPlus scratch tree: ${oplus_work#"$ENGINE_BUILD_DIR"/}"
+        done < <(find "$ENGINE_BUILD_DIR" -mindepth 2 -maxdepth 4 -type d -name '.oplus-work' 2>/dev/null)
+    fi
+
+    # Leftover download archives. The engine already removes each archive as
+    # soon as its tree is extracted; this is a safety net for partial failures.
+    rm_reclaim "$ENGINE_BUILD_DIR/downloads" "leftover ROM download archives"
+
+    log_info "Disk space after post-extract cleanup:"
+    report_disk
+    log_info "Post-extract cleanup completed (baserom/images and super.img preserved)"
 }
 
 # Pre-package cleanup: Before ZIP generation
@@ -223,6 +304,7 @@ Usage: $(basename "$0") <mode> [options]
 Modes:
   bootstrap    Initial runner setup cleanup (pre-build)
   pre-build    Cleanup before ROM build starts
+  post-extract Cleanup after partition reconstruction, before packaging
   pre-package  Cleanup before packaging stage
   post-package Cleanup after final ZIP is created (preserves final ZIP)
   final        Final cleanup (always runs)
@@ -287,6 +369,9 @@ main() {
             ;;
         pre-build)
             cleanup_pre_build
+            ;;
+        post-extract)
+            cleanup_post_extract
             ;;
         pre-package)
             cleanup_pre_package
