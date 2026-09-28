@@ -173,20 +173,32 @@ jobs:
         with:
           build-mount-path: ${{ github.workspace }}/toolbuild
           swap-size-mb: 1024
-          # ── root-reserve-mb must leave room for the runner's own writes ──
+          # ── Why overprovision + BOTH reserves are required ────────────────
           #
-          # This action does not add capacity: it moves the existing root disk
-          # into an LVM loop device and re-mounts the build directory there.
-          # It calls fallocate() on /pv.img (root) AND /mnt/tmp-pv.img, and on
-          # a GitHub runner /mnt lives on the SAME /dev/root filesystem, so
-          # BOTH sparse images are charged against root. In run 36417133938
-          # root had 86G free and the action left it at 100M free / 100% full.
+          # This action does not add capacity: it repartitions the same disk
+          # into an LVM volume and re-mounts the build directory there. It
+          # fallocate()s TWO loop PV images:
           #
-          # root-reserve-mb is subtracted from root free space BEFORE the loop
-          # image is sized, so it is the ONLY knob that keeps the runner itself
-          # writable. The build also writes outside toolbuild (Java, pip/gradle
-          # caches, /tmp, rclone temp uploads, apt), so 512MB was not enough.
-          root-reserve-mb: 20000
+          #   /pv.img          sized from free space on /   minus root-reserve-mb
+          #   /mnt/tmp-pv.img  sized from free space on /mnt minus temp-reserve-mb
+          #
+          # On a GitHub runner /mnt is NOT a separate filesystem, it is a
+          # directory on /dev/root, so BOTH images are charged against the same
+          # pool and each reserve applies to only one of them. Measured across
+          # runs 36417133938 (reserve 512MB) and 36429113528 (reserve 20000MB):
+          # the build volume came out at 102G and / ended at 100M free / 100%
+          # full BOTH times. Raising root-reserve-mb alone changed nothing,
+          # because the /mnt image is sized from the same free space and simply
+          # takes whatever is left.
+          #
+          # overprovision-lvm makes the PV images sparse, so their full size
+          # does not immediately consume root. That is what actually keeps the
+          # runner writable; the reserves then bound how much of the real disk
+          # the build may claim, leaving room for Java, gradle/pip caches, /tmp
+          # and upload staging outside toolbuild.
+          overprovision-lvm: "true"
+          root-reserve-mb: 12000
+          temp-reserve-mb: 12000
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
