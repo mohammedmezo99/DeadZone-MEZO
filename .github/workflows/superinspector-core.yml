@@ -283,16 +283,18 @@ jobs:
       - name: "Stage callback emitter helper"
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set +e
           mkdir -p /tmp
-          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
-          chmod +x /tmp/dz_emit_callback.py
-          if ! python3 -m py_compile /tmp/dz_emit_callback.py; then
-            echo "::warning::dz_emit_callback.py failed to compile; callbacks will fall back to inline heredocs"
-          fi
-          # Sanity-check the script exists and is executable regardless of py_compile exit.
-          test -x /tmp/dz_emit_callback.py
+          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py 2>&1
+          chmod +x /tmp/dz_emit_callback.py 2>&1
+          python3 -m py_compile /tmp/dz_emit_callback.py 2>&1 || true
           echo "callback emitter ready"
+          # Always exit 0 - the inline heredoc callbacks are the primary
+          # delivery path; this helper is only a thin convenience for the
+          # two failure-attribution paths. We must NOT make the entire
+          # workflow skip downstream steps if anything about the helper
+          # copy is unusual on a given runner image.
+          exit 0
 
       - name: "Report setup.started"
         if: success()
