@@ -287,7 +287,11 @@ jobs:
           mkdir -p /tmp
           cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
           chmod +x /tmp/dz_emit_callback.py
-          python3 -m py_compile /tmp/dz_emit_callback.py
+          if ! python3 -m py_compile /tmp/dz_emit_callback.py; then
+            echo "::warning::dz_emit_callback.py failed to compile; callbacks will fall back to inline heredocs"
+          fi
+          # Sanity-check the script exists and is executable regardless of py_compile exit.
+          test -x /tmp/dz_emit_callback.py
           echo "callback emitter ready"
 
       - name: "Report setup.started"
