@@ -1046,12 +1046,31 @@ jobs:
             --project super \
             --message "DeadZone Super Inspector run cancelled."
 
-      - name: "Upload job log bundle"
+      - name: "Stage + upload job log bundle"
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          stage="$GITHUB_WORKSPACE/_dz_logs_$DEADZONE_JOB_ID"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          if [[ -n "$root" && -d "$root/logs" ]]; then
+            # actions/upload-artifact@v4 only accepts paths under
+            # GITHUB_WORKSPACE, but the run workspace is on the
+            # toolbuild volume mounted outside GITHUB_WORKSPACE.
+            # Copy the logs to the runner workspace before uploading.
+            cp -a "$root/logs/." "$stage/" || true
+          fi
+          # Tell upload-artifact where to look.
+          printf 'DZ_LOG_STAGE=%s\n' "$stage" >> "$GITHUB_ENV"
+
+      - name: "Upload job log bundle (artifact)"
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: superinspector-logs-${{ inputs.job_id }}
-          path: ${{ steps.workspace.outputs.ROOT }}/logs/
+          path: ${{ env.DZ_LOG_STAGE }}
           if-no-files-found: warn
           retention-days: 14
 
