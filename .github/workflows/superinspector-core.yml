@@ -547,12 +547,15 @@ jobs:
           echo "running self-contained deadzone_mezo pipeline against $rom"
           START_MS=$(date +%s%3N)
           set +e
+          # tee into BOTH the canonical logs/ dir and mezo_output/ so
+          # either path can pick up the bundle for the artifact upload.
+          mkdir -p "$root/logs"
           python3 "$repo_root/.github/scripts/e2e_real_rom.py" \
             --url "$rom" \
             --rom-path "$rom" \
             --output "$out" \
             --max-bytes "$DEADZONE_MAX_ROM_BYTES" \
-            --json 2>&1 | tee "$root/logs/mezo_pipeline.log"
+            --json 2>&1 | tee "$root/logs/mezo_pipeline.log" "$out/mezo_pipeline.log"
           status="${PIPESTATUS[0]}"
           set -e
           END_MS=$(date +%s%3N)
@@ -1079,10 +1082,12 @@ jobs:
         run: |
           set -u
           root="${{ steps.workspace.outputs.ROOT }}"
+          mezo_out="${root:-}/mezo_output"
           stage="$GITHUB_WORKSPACE/_dz_logs_${DEADZONE_JOB_ID:-nojobid}"
           rm -rf "$stage"
           mkdir -p "$stage"
           echo "ROOT: ${root:-<empty>}"
+          echo "MEZO_OUT: ${mezo_out:-<empty>}"
           echo "STAGE: $stage"
           echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
           if [[ -n "${root:-}" && -d "$root/logs" ]]; then
@@ -1090,6 +1095,13 @@ jobs:
             echo "copied logs from $root/logs/ to $stage/"
           else
             echo "WARNING: source logs dir not found at ${root:-<unset>}/logs"
+          fi
+          if [[ -d "$mezo_out" ]]; then
+            mkdir -p "$stage/mezo_output"
+            cp -a "$mezo_out/." "$stage/mezo_output/" || true
+            echo "copied mezo_output from $mezo_out/ to $stage/mezo_output/"
+          else
+            echo "WARNING: mezo_output dir not found at $mezo_out"
           fi
           echo "deadzone_mezo staging OK at $(date -u +%FT%TZ)" > "$stage/_staging_sentinel.txt"
           echo "staged files under $stage:"
