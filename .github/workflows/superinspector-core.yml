@@ -538,14 +538,30 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPER_INSPECTOR_REPOSITORY_TOKEN: ${{ secrets.SUPER_INSPECTOR_REPOSITORY_TOKEN }}
         run: |
           set -Eeuo pipefail
           root="${{ steps.workspace.outputs.ROOT }}"
-          auth_header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -c "http.extraheader=AUTHORIZATION: basic ${auth_header}" \
-              clone --no-tags --branch "$DEADZONE_INSPECTOR_REF" \
-              "https://github.com/${DEADZONE_INSPECTOR_REPOSITORY}" \
-              "$root/inspector"
+          repo_url="https://github.com/${DEADZONE_INSPECTOR_REPOSITORY}"
+          # The pinned inspector lives in a *private* repo. The default
+          # GITHUB_TOKEN in a reusable-workflow call only has access to
+          # the caller repository, so a PAT configured as
+          # SUPER_INSPECTOR_REPOSITORY_TOKEN must be used to clone the
+          # inspector source. Try the PAT first; fall back to
+          # GITHUB_TOKEN only for fully public repos / mirrors.
+          clone_repo() {
+            local tok="$1"
+            local hdr
+            hdr="$(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+            git -c "http.extraheader=AUTHORIZATION: basic ${hdr}" \
+                clone --no-tags --branch "$DEADZONE_INSPECTOR_REF" \
+                "$repo_url" "$root/inspector"
+          }
+          if [[ -n "${SUPER_INSPECTOR_REPOSITORY_TOKEN:-}" ]]; then
+            clone_repo "$SUPER_INSPECTOR_REPOSITORY_TOKEN"
+          else
+            clone_repo "$GH_TOKEN"
+          fi
           cd "$root/inspector"
           git checkout --quiet "$DEADZONE_INSPECTOR_REF"
           RESOLVED_SHA="$(git rev-parse HEAD)"
@@ -774,6 +790,7 @@ jobs:
           STAGE_ROOT: ${{ steps.workspace.outputs.ROOT }}/stage
           DZ_PUBLISH_RESULTS: ${{ steps.workspace.outputs.ROOT }}/publish_results.json
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPER_INSPECTOR_REPOSITORY_TOKEN: ${{ secrets.SUPER_INSPECTOR_REPOSITORY_TOKEN }}
         run: |
           set -Eeuo pipefail
           if [[ ! -d "$STAGE_ROOT" ]]; then
@@ -834,7 +851,15 @@ jobs:
                                        "commitSha": head})
                       continue
                   tmp = tempfile.mkdtemp(prefix="dz_pub_")
-                  token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+                  # Prefer the dedicated publish PAT when present; only
+                  # fall back to GITHUB_TOKEN for repos where the
+                  # default token already has push rights.
+                  token = (
+                      os.environ.get("SUPER_INSPECTOR_REPOSITORY_TOKEN")
+                      or os.environ.get("GITHUB_TOKEN")
+                      or os.environ.get("GH_TOKEN")
+                      or ""
+                  )
                   authed_url = f"https://x-access-token:{token}@github.com/{repo}.git"
                   subprocess.run(
                       ["git", "clone", "--depth=1", "--quiet", authed_url,
