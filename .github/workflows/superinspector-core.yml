@@ -570,7 +570,34 @@ jobs:
           echo "MEZO_PROFILE_PATH=$profile_path" >> "$GITHUB_OUTPUT"
           echo "MEZO_PROFILE_SHA256=$profile_sha" >> "$GITHUB_OUTPUT"
           echo "MEZO_DURATION_MS=$((END_MS - START_MS))" >> "$GITHUB_OUTPUT"
+          # Echo a summary directly into the workflow log so the run
+          # is self-documenting even if the artifact upload fails.
           echo "deadzone_mezo pipeline OK in $((END_MS - START_MS)) ms"
+          echo "profile sha256: $profile_sha"
+          MEZO_PROFILE="$profile_path" python3 - <<'PY'
+          import json, os
+          p = json.load(open(os.environ["MEZO_PROFILE"], encoding="utf-8"))
+          dev = p.get("device", {})
+          rom = p.get("rom", {})
+          sup = p.get("super", {})
+          inv = p.get("inventory", {})
+          ana = p.get("analysis_status", {})
+          print(f"  codename     : {dev.get('primary_codename')}")
+          print(f"  models       : {dev.get('models')}")
+          print(f"  vendor       : {dev.get('vendor')}")
+          print(f"  android      : {rom.get('android_version')}")
+          print(f"  build_id     : {rom.get('build_id')}")
+          print(f"  fingerprint  : {rom.get('build_fingerprint')}")
+          print(f"  region       : {rom.get('region')}")
+          print(f"  super_format : {sup.get('format')}")
+          print(f"  partitions   : {sup.get('partition_count')}")
+          print(f"  lp_metadata  : {sup.get('lp_metadata_size')} bytes")
+          print(f"  images_count : {inv.get('image_count')}")
+          print(f"  archive_ok   : {ana.get('archive_validated')}")
+          print(f"  super_witness: {sup.get('witness_super_inspector')}")
+          print(f"  profile_id   : {p.get('profile_id')}")
+          print(f"  schema       : {p.get('schema_version')}")
+          PY
 
       - name: "Report analyze.started"
         if: success()
