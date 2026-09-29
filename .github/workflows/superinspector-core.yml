@@ -152,6 +152,15 @@ jobs:
       # makes the callback contract byte-identical to the runtime's
       # report_build_event.py signer.
     steps:
+      - name: "Checkout caller repository (provides dz_emit_callback.py + dz_validate_rom.py)"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          ref: ${{ github.event.repository.default_branch }}
+          path: caller_repo
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: "Validate inputs"
         id: validate_inputs
         shell: bash
@@ -298,10 +307,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p /tmp
-          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
-          cp "$GITHUB_WORKSPACE/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
+          cp "$RUNNER_TEMP/caller_repo/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
+          cp "$RUNNER_TEMP/caller_repo/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
           chmod +x /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
           python3 -m py_compile /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
+          printf 'CALLER_REPO_DIR=%s\n' "$RUNNER_TEMP/caller_repo" >> "$GITHUB_ENV"
           echo "helpers ready"
 
       - name: "Report setup.started"
@@ -738,7 +748,7 @@ jobs:
           inspector_ref = os.environ["DEADZONE_INSPECTOR_REF"]
           commit_msg = f"super(profile): {profile_id} via {inspector_ref}"
           launcher_repo = os.environ["DEADZONE_TARGET_REPO"]
-          launcher = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          launcher = pathlib.Path(os.environ.get("CALLER_REPO_DIR") or os.environ.get("GITHUB_WORKSPACE", "/tmp"))
 
           results = []
           for repo in targets:
