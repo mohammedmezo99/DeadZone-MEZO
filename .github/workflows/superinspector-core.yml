@@ -1046,7 +1046,7 @@ jobs:
             --project super \
             --message "DeadZone Super Inspector run cancelled."
 
-      - name: "Stage + upload job log bundle"
+      - name: "Upload job log bundle (artifact)"
         if: always()
         shell: bash
         run: |
@@ -1062,15 +1062,18 @@ jobs:
             # Copy the logs to the runner workspace before uploading.
             cp -a "$root/logs/." "$stage/" || true
           fi
-          # Tell upload-artifact where to look.
-          printf 'DZ_LOG_STAGE=%s\n' "$stage" >> "$GITHUB_ENV"
+          # Echo every staged file so the step log proves the bundle
+          # is non-empty when the artifact upload reports nothing.
+          echo "staged files under $stage:"
+          find "$stage" -maxdepth 5 -type f | sort || true
+          echo "total staged size: $(du -sb "$stage" 2>/dev/null | awk '{print $1}') bytes"
 
-      - name: "Upload job log bundle (artifact)"
+      - name: "Upload job log bundle artifact"
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: superinspector-logs-${{ inputs.job_id }}
-          path: ${{ env.DZ_LOG_STAGE }}
+          path: ${{ github.workspace }}/_dz_logs_${{ inputs.job_id }}
           if-no-files-found: warn
           retention-days: 14
 
