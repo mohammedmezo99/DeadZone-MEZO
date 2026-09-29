@@ -194,10 +194,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          root="$RUNNER_TEMP/$DEADZONE_DOWNLOADS_ROOT/$DEADZONE_JOB_ID"
+          # The system root filesystem only has ~100MB free. Put the
+          # isolated workspace on the 100GB volume mounted by
+          # `easimon/maximize-build-space` at toolbuild/ so we can
+          # actually fit a 5-12 GB Xiaomi Fastboot ROM.
+          build_volume="${BUILD_VOLUME:-${{ github.workspace }}/toolbuild}"
+          mkdir -p "$build_volume"
+          root="$build_volume/$DEADZONE_DOWNLOADS_ROOT/$DEADZONE_JOB_ID"
           mkdir -p "$root"/input "$root"/inspector "$root"/output "$root"/logs "$root"/downloads "$root"/stage
           echo "ROOT=$root" >> "$GITHUB_OUTPUT"
+          echo "BUILD_VOLUME=$build_volume" >> "$GITHUB_ENV"
           echo "workspace=$root"
+          df -h "$root"
           ls -la "$root"
 
       - name: "Maximize build space"
@@ -936,7 +944,9 @@ jobs:
           root="${{ steps.workspace.outputs.ROOT }}"
           if [[ -n "$root" && -d "$root" ]]; then
             tar -C "$root" -czf "$root/logs/bundle.tar.gz" logs || true
-            rm -rf "$root/input" "$root/inspector" "$root/stage"
+            rm -rf "$root/input" "$root/inspector" "$root/stage" || true
+            # Remove the per-job directory but keep the toolbuild volume mounted
+            rm -rf "$root" || true
             echo "cleaned $root"
           fi
 
