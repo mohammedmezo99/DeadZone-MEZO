@@ -219,33 +219,6 @@ jobs:
           python3 -V
           pip3 -V
 
-      - name: "Report setup.started"
-        if: success()
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "setup.started",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "stage": "setup",
-              "progress": 5,
-              "message": "Preparing Super Inspector worker",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: setup.started callback failed:", exc)
-          PY
-
       - name: "Checkout central DeadZone runtime"
         uses: actions/checkout@v4
         with:
@@ -312,6 +285,33 @@ jobs:
           cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
           chmod +x /tmp/dz_emit_callback.py
           python3 -c "import importlib.util,sys; spec=importlib.util.spec_from_file_location('dz_emit', '/tmp/dz_emit_callback.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('callback emitter ready')"
+
+      - name: "Report setup.started"
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          payload = {
+              "type": "setup.started",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "stage": "setup",
+              "progress": 5,
+              "message": "Preparing Super Inspector worker",
+          }
+          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  resp.read()
+          except Exception as exc:
+              print("warning: setup.started callback failed:", exc)
+          PY
 
       - name: "Report setup.completed"
         if: success()
