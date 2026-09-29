@@ -498,6 +498,7 @@ jobs:
         env:
           CANONICAL_CALLBACK_PATH: ${{ steps.canonical.outputs.CANONICAL_CALLBACK_PATH }}
           PROFILE_DIR: ${{ steps.analyze.outputs.PROFILE_DIR }}
+          DZ_STAGE_ROOT: ${{ steps.workspace.outputs.ROOT }}/stage
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
@@ -529,14 +530,13 @@ jobs:
           print("stage root:", stage_root)
           print("target   :", target)
           PY
-        env:
-          DZ_STAGE_ROOT: ${{ steps.workspace.outputs.ROOT }}/stage
 
       - name: "Publish profile metadata to launcher + Lite + Port"
         id: publish
         if: success() && inputs.publish_enabled == 'true'
         env:
           STAGE_ROOT: ${{ steps.workspace.outputs.ROOT }}/stage
+          DZ_PUBLISH_RESULTS: ${{ steps.workspace.outputs.ROOT }}/publish_results.json
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
@@ -664,8 +664,6 @@ jobs:
           for entry in results:
               print(entry)
           PY
-        env:
-          DZ_PUBLISH_RESULTS: ${{ steps.workspace.outputs.ROOT }}/publish_results.json
 
       - name: "Report publish.completed / publish.failed (per destination)"
         if: always() && inputs.publish_enabled == 'true'
