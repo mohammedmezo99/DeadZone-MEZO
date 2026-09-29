@@ -556,9 +556,13 @@ jobs:
             local tok="$1"
             local hdr
             hdr="$(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+            # The pinned inspector ref is normally a 40-char commit
+            # SHA, not a branch name. `git clone --branch <sha>` only
+            # works when the SHA matches an existing ref name, so we
+            # always clone the default branch and then detach at the
+            # requested SHA below.
             git -c "http.extraheader=AUTHORIZATION: basic ${hdr}" \
-                clone --no-tags --branch "$DEADZONE_INSPECTOR_REF" \
-                "$repo_url" "$root/inspector"
+                clone --no-tags "$repo_url" "$root/inspector"
           }
           token=""
           if [[ -n "${SUPER_INSPECTOR_REPOSITORY_TOKEN:-}" ]]; then
@@ -570,6 +574,7 @@ jobs:
           fi
           clone_repo "$token"
           cd "$root/inspector"
+          git fetch --quiet --unshallow origin 2>/dev/null || true
           git checkout --quiet "$DEADZONE_INSPECTOR_REF"
           RESOLVED_SHA="$(git rev-parse HEAD)"
           echo "RESOLVED_SHA=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
