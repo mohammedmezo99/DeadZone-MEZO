@@ -256,8 +256,11 @@ jobs:
           python3 -m py_compile runtime/report_build_event.py || true
           # load-build.sh sources both env files and pushes every key into
           # $GITHUB_ENV. The signing secret for our callbacks is exposed
-          # via BUILD_PROGRESS_SECRET, exactly like Lite does.
-          bash runtime/load-build.sh super
+          # via BUILD_PROGRESS_SECRET, exactly like Lite does. We pass
+          # `lite` as the project key because the loader only requires
+          # it to derive DEADZONE_ENGINE_REPOSITORY; the Super Inspector
+          # worker never touches the engine repo so the value is unused.
+          bash runtime/load-build.sh lite
 
       - name: "Validate loaded runtime + derive callback secret"
         shell: bash
