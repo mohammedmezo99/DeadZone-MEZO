@@ -287,7 +287,8 @@ jobs:
           mkdir -p /tmp
           cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
           chmod +x /tmp/dz_emit_callback.py
-          python3 -c "import importlib.util,sys; spec=importlib.util.spec_from_file_location('dz_emit', '/tmp/dz_emit_callback.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('callback emitter ready')"
+          python3 -m py_compile /tmp/dz_emit_callback.py
+          echo "callback emitter ready"
 
       - name: "Report setup.started"
         if: success()
