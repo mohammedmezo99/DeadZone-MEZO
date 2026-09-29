@@ -19,6 +19,7 @@ WORKFLOWS_WITH_TERMINAL_REPORTING = [
     "custom-ninja.yml",
     "custom-legend.yml",
     "custom-gamingplus.yml",
+    "superinspector-core.yml",
 ]
 
 def get_step_order(workflow_path: Path) -> list:

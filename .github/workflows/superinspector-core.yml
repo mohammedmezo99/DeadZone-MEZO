@@ -20,27 +20,40 @@ name: MEZO-SuperInspector Core
 #      following, HTTP validation, file-size validation, and SHA-256.
 #      Download failures emit a signed `download.failed` callback so
 #      Telegram learns about it before the workflow exits.
-#   5. Check out DeadZone-SuperInspector at the pinned ref and run its
+#   5. Validate the archive format (path-traversal-safe `tarfile`
+#      open + member/file count) so HTML error pages and truncated
+#      downloads are caught BEFORE the engine sees them.
+#   6. Check out DeadZone-SuperInspector at the pinned ref and run its
 #      real analysis pipeline (`build.sh analyze`).
-#   6. Project the dz-inspector output into the canonical Device
+#   7. Project the dz-inspector output into the canonical Device
 #      Profile JSON the Cloudflare Worker expects and POST a signed
 #      `analyze.completed` callback carrying the full profile.
-#   7. Validate the canonical profile against the bot's published
+#   8. Validate the canonical profile against the bot's published
 #      contract (16-hex profile_id, primary_codename present, generator
 #      SHA matches the pinned ref, etc.).
-#   8. Materialise the profile tree on the workflow runner, then for
+#   9. Materialise the profile tree on the workflow runner, then for
 #      each destination repo (the launcher itself + configured Lite +
 #      configured Port) clone, rsync the tree, and push only when the
 #      working tree actually changed. Authentication uses the runner's
 #      auto-injected `GITHUB_TOKEN` so no extra secret is required.
-#   9. Report `publish.completed` once each destination commit is
+#  10. Report `publish.completed` once each destination commit is
 #      confirmed, or `publish.failed` with the profile preserved as
 #      a workflow artifact so the user can retry.
 #
 # Every step failure routes through the signed callback mechanism
 # before exiting, so Telegram always learns whether the failure was
 # a download, setup, install, analysis, validation, publishing, or
-# callback error.
+# callback error. The callback signature matches the central
+# runtime's `report_build_event.py` contract:
+#
+#   signature = "sha256=" + HMAC(secret, f"{timestamp}.{body}")
+#   headers    = X-DeadZone-Timestamp, X-DeadZone-Signature
+#
+# The previous wrong signing scheme (no timestamp prefix + lowercase
+# `x-deadzone-signature` header) caused the bot to reject callbacks
+# with HTTP 403; non-terminal lifecycle callbacks now go through the
+# `dz_emit_callback.py` helper and terminal failures go through the
+# runtime's `report_build_event.py` exactly the way Lite does.
 
 on:
   workflow_call:
@@ -103,14 +116,6 @@ on:
     secrets:
       GH_TOKEN:
         required: true
-      # The signing secret is loaded from the central runtime
-      # (`runtime/build.env` -> `BUILD_PROGRESS_SECRET`) inside the
-      # workflow itself, the same way Lite and Port do it. No
-      # `DEADZONE_CALLBACK_SECRET` declaration is required here, which
-      # was the root cause of the previous `403 Forbidden` on the
-      # callback endpoint: this repo never had that secret declared
-      # so `secrets: inherit` from the round-robin workflow left it
-      # empty.
       SUPER_INSPECTOR_REPOSITORY_TOKEN:
         required: false
       # GITHUB_TOKEN is intentionally NOT declared here. The reusable
@@ -141,9 +146,11 @@ jobs:
       DEADZONE_INSPECTOR_REPOSITORY: "mohammedmezo99/DeadZone-SuperInspector"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SUPER_INSPECTOR_REPOSITORY_TOKEN: ${{ secrets.SUPER_INSPECTOR_REPOSITORY_TOKEN }}
-      # DEADZONE_CALLBACK_SECRET is sourced from the central runtime
-      # in the "Load central runtime" step and forwarded through
-      # $GITHUB_ENV, not from the workflow_call `secrets:` interface.
+      # DEADZONE_EVENT_SECRET / DEADZONE_CALLBACK_SECRET are sourced from
+      # the central runtime in the "Load central runtime" step and
+      # forwarded through $GITHUB_ENV. This matches Lite's pattern and
+      # makes the callback contract byte-identical to the runtime's
+      # report_build_event.py signer.
     steps:
       - name: "Validate inputs"
         id: validate_inputs
@@ -277,104 +284,49 @@ jobs:
             exit 1
           fi
           printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          # Mirror Lite's pattern: expose both DEADZONE_EVENT_SECRET
+          # (the runtime-side canonical name) and DEADZONE_CALLBACK_SECRET
+          # (the legacy name retained for backwards compatibility with
+          # any older helper scripts). The runtime's report_build_event.py
+          # reads DEADZONE_EVENT_SECRET / BUILD_PROGRESS_SECRET.
+          printf 'DEADZONE_EVENT_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           printf 'DEADZONE_CALLBACK_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           echo "callback secret loaded (sha256 prefix: ${BUILD_PROGRESS_SECRET:0:8})"
 
-      - name: "Stage callback emitter helper"
+      - name: "Stage callback emitter + validator helpers"
         shell: bash
         run: |
-          set +e
+          set -Eeuo pipefail
           mkdir -p /tmp
-          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py 2>&1
-          chmod +x /tmp/dz_emit_callback.py 2>&1
-          python3 -m py_compile /tmp/dz_emit_callback.py 2>&1 || true
-          echo "callback emitter ready"
-          # Always exit 0 - the inline heredoc callbacks are the primary
-          # delivery path; this helper is only a thin convenience for the
-          # two failure-attribution paths. We must NOT make the entire
-          # workflow skip downstream steps if anything about the helper
-          # copy is unusual on a given runner image.
-          exit 0
+          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
+          cp "$GITHUB_WORKSPACE/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
+          chmod +x /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
+          python3 -m py_compile /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
+          echo "helpers ready"
 
       - name: "Report setup.started"
         if: success()
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "setup.started",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "stage": "setup",
-              "progress": 5,
-              "message": "Preparing Super Inspector worker",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: setup.started callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py setup.started setup "Preparing Super Inspector worker"
+          exit 0
 
       - name: "Report setup.completed"
         if: success()
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "setup.completed",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "stage": "setup",
-              "progress": 15,
-              "message": "Worker environment ready",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: setup.completed callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py setup.completed setup "Worker environment ready"
+          exit 0
 
       - name: "Report download.started"
         if: success()
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "download.started",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "progress": 18,
-              "message": "Downloading ROM from upstream mirror",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: download.started callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py download.started download "Downloading ROM from upstream mirror"
+          exit 0
 
       - name: "Download ROM (streamed, bounded)"
         id: download
@@ -391,11 +343,18 @@ jobs:
           safe_url="$ROM_URL"
           if [[ "$safe_url" =~ ^[A-Za-z]+://([^/:@]+):([^/:@]+)@ ]]; then
             echo "::error::Refusing URL with embedded credentials"
+            export CURL_STATUS="url_rejected"
+            python3 /tmp/dz_emit_callback.py download.failed download "refusing URL with embedded credentials" || true
             exit 1
           fi
           case "$safe_url" in
             http://*|https://*) ;;
-            *) echo "::error::Refusing non-http(s) URL"; exit 1 ;;
+            *)
+              echo "::error::Refusing non-http(s) URL"
+              export CURL_STATUS="url_rejected"
+              python3 /tmp/dz_emit_callback.py download.failed download "refusing non-http(s) URL" || true
+              exit 1
+              ;;
           esac
 
           base_name="$ORIGINAL_FILENAME"
@@ -420,10 +379,9 @@ jobs:
 
           # Use curl's `--max-filesize` so a server that over-reports the
           # Content-Length still aborts the body stream instead of filling
-          # the runner disk. The flag accepts decimal byte counts and is
-          # the documented guard against the `curl: (63) Maximum file
-          # size exceeded` error that 4 GiB ROMs triggered with the old
-          # 4294967296 default.
+          # the runner disk. `--fail-with-body` returns the HTTP error
+          # body so we can surface upstream reasons, but we treat any
+          # non-zero exit as a hard failure.
           set +e
           curl_args=(
             --silent --show-error --location --max-redirs 10
@@ -442,13 +400,15 @@ jobs:
             echo "::error::ROM download failed (curl exit $status); see $rom_dir/curl.log"
             rm -f "$target.part"
             export CURL_STATUS="$status"
-            python3 /tmp/dz_emit_callback.py download.failed download "curl exit ${CURL_STATUS}; see ${rom_dir}/curl.log"
+            python3 /tmp/dz_emit_callback.py download.failed download "curl exit ${CURL_STATUS}; see ${rom_dir}/curl.log" || true
             exit 1
           fi
 
           if [[ ! -s "$target.part" ]]; then
             echo "::error::Downloaded file is empty"
             rm -f "$target.part"
+            export CURL_STATUS="empty"
+            python3 /tmp/dz_emit_callback.py download.failed download "downloaded file is empty" || true
             exit 1
           fi
 
@@ -456,11 +416,15 @@ jobs:
           if (( size <= 0 )); then
             echo "::error::Downloaded archive is empty"
             rm -f "$target.part"
+            export CURL_STATUS="empty"
+            python3 /tmp/dz_emit_callback.py download.failed download "downloaded archive is empty" || true
             exit 1
           fi
           if (( size > max_bytes )); then
             echo "::error::Archive exceeds $max_bytes bytes (got $size)"
             rm -f "$target.part"
+            export CURL_STATUS="too_large"
+            python3 /tmp/dz_emit_callback.py download.failed download "archive exceeds ${max_bytes} bytes (got ${size})" || true
             exit 1
           fi
 
@@ -472,6 +436,20 @@ jobs:
           echo "ROM_NAME=$base_name" >> "$GITHUB_OUTPUT"
           echo "downloaded $base_name ($size bytes) sha256=$sha256"
 
+      - name: "Validate downloaded ROM archive"
+        id: validate_archive
+        shell: bash
+        env:
+          ROM_PATH: ${{ steps.download.outputs.ROM_PATH }}
+        run: |
+          set -Eeuo pipefail
+          if ! python3 /tmp/dz_validate_rom.py "$ROM_PATH"; then
+            echo "::error::ROM archive failed structural validation"
+            python3 /tmp/dz_emit_callback.py download.failed download "archive failed structural validation (not a valid tar.gz/tar)" || true
+            exit 1
+          fi
+          echo "archive validated"
+
       - name: "Report download.completed"
         if: success()
         shell: bash
@@ -480,58 +458,18 @@ jobs:
           ROM_SIZE: ${{ steps.download.outputs.ROM_SIZE }}
           ROM_NAME: ${{ steps.download.outputs.ROM_NAME }}
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "download.completed",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
-              "profileId": os.environ["DEADZONE_PROFILE_ID"],
-              "target": os.environ["DEADZONE_TARGET_REPO"],
-              "romSha256": os.environ["ROM_SHA256"],
-              "romSize": int(os.environ["ROM_SIZE"]),
-              "romName": os.environ["ROM_NAME"],
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: download.completed callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py download.completed download "ROM ready for analysis" \
+            "romSha256=$ROM_SHA256" "romSize=$ROM_SIZE" "romName=$ROM_NAME"
+          exit 0
 
       - name: "Report analyze.started"
         if: success()
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os as _os, urllib.request
-          payload = {
-              "type": "analyze.started",
-              "jobId": _os.environ["DEADZONE_JOB_ID"],
-              "stage": "analyze",
-              "progress": 45,
-              "message": "Running DeadZone-SuperInspector analysis",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = _os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(_os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: analyze.started callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py analyze.started analyze "Running DeadZone-SuperInspector analysis"
+          exit 0
 
       - name: "Checkout pinned DeadZone-SuperInspector"
         id: checkout
@@ -621,17 +559,22 @@ jobs:
           END_MS=$(date +%s%3N)
           if [[ "$status" -ne 0 ]]; then
             echo "::error::dz-inspector analyze exited with $status"
-            # Best-effort stage attribution: if the log mentions a
-            # specific failure, surface it via the callback so the
-            # user does not get a generic "ROM analysis failed".
-            FAIL_MSG=$(tail -n 30 "$root/logs/analyze.log" | tr -d '\r' | tr '\n' ' ' | cut -c1-500)
-            export FAIL_MSG
+            # Best-effort stage attribution: surface the tail of the
+            # engine log via the callback so the user does not get a
+            # generic "ROM analysis failed". Never block the failure
+            # callback on the engine log being missing.
+            FAIL_MSG="$(tail -n 30 "$root/logs/analyze.log" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-500)"
+            if [[ -n "$FAIL_MSG" ]]; then
+              export details="$FAIL_MSG"
+            fi
             python3 /tmp/dz_emit_callback.py analyze.failed analyze "dz-inspector analyze exited with non-zero status" || true
             exit "$status"
           fi
           profile_dir="$(find "$out" -mindepth 3 -maxdepth 3 -type d -name "[a-f0-9]*" | head -n1)"
           if [[ -z "$profile_dir" || ! -s "$profile_dir/device.json" ]]; then
             echo "::error::device.json missing under $out"
+            export details="device.json missing under $out"
+            python3 /tmp/dz_emit_callback.py analyze.failed analyze "device.json missing after analysis" || true
             exit 1
           fi
           profile_sha=$(sha256sum "$profile_dir/device.json" | awk '{print $1}')
@@ -653,6 +596,9 @@ jobs:
           out_base="$(dirname "$(dirname "$PROFILE_DIR")")"
           out_base="$(realpath "$out_base")"
           cb_path="$root/output/callback.json"
+          # The canonical profile expects `generator.run_id` so the bot
+          # can link the profile back to the GitHub Actions run that
+          # produced it. `$GITHUB_RUN_ID` is the workflow-level id.
           python3 "$root/inspector/scripts/emit_canonical_profile.py" \
             --output-dir "$out_base" \
             --generator-repository "mohammedmezo99/DeadZone-SuperInspector" \
@@ -665,6 +611,7 @@ jobs:
             --target-repo "$DEADZONE_TARGET_REPO" \
             --job-id "$DEADZONE_JOB_ID" \
             --profile-id "$DEADZONE_PROFILE_ID" \
+            --run-id "${GITHUB_RUN_ID:-}" \
             --duration-ms "$DURATION_MS" \
             --emit-callback analyze_completed \
             --out "$cb_path"
@@ -679,22 +626,9 @@ jobs:
         env:
           DZ_CALLBACK_PATH: ${{ steps.canonical.outputs.CANONICAL_CALLBACK_PATH }}
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, os, urllib.request
-          with open(os.environ["DZ_CALLBACK_PATH"], "rb") as fh:
-              body = fh.read()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: analyze.completed callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py --callback-file "$DZ_CALLBACK_PATH" analyze.completed analyze "ROM analysis completed"
+          exit 0
 
       - name: "Validate canonical Device Profile (bot contract)"
         id: validate_profile
@@ -737,27 +671,9 @@ jobs:
         if: success()
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "validation.completed",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "profileId": os.environ["DEADZONE_PROFILE_ID"],
-              "target": os.environ["DEADZONE_TARGET_REPO"],
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: validation.completed callback failed:", exc)
-          PY
+          set +e
+          python3 /tmp/dz_emit_callback.py validation.completed validate "Canonical Device Profile validated"
+          exit 0
 
       - name: "Stage publish tree on the runner"
         id: stage
@@ -811,7 +727,6 @@ jobs:
           fi
           python3 - <<'PY'
           import os, pathlib, shutil, subprocess, sys, tempfile
-          from urllib.parse import urlsplit, urlunsplit
 
           stage_root = pathlib.Path(os.environ["STAGE_ROOT"])
           targets = [
@@ -935,68 +850,72 @@ jobs:
             exit 0
           fi
           python3 - <<'PY'
-          import hashlib, hmac, json, os, sys, urllib.request
+          import json, os, subprocess
           results = json.load(open(os.environ["DZ_PUBLISH_RESULTS"], encoding="utf-8"))
           for entry in results:
               repo = entry["repo"]
               pushed = entry.get("pushed", False)
               payload_type = "publish.completed" if pushed else "publish.failed"
-              payload = {
-                  "type": payload_type,
-                  "jobId": os.environ["DEADZONE_JOB_ID"],
-                  "profileId": os.environ["DEADZONE_PROFILE_ID"],
-                  "target": repo,
-              }
+              cmd = [
+                  "python3", "/tmp/dz_emit_callback.py",
+                  payload_type, "publish",
+                  "publish ok" if pushed else (entry.get("reason") or "publish failed"),
+                  f"target={repo}",
+              ]
               if pushed:
-                  payload["commitSha"] = entry.get("commitSha") or os.environ.get("GITHUB_SHA", "")
-                  payload["runId"] = os.environ.get("GITHUB_RUN_ID", "")
+                  sha = entry.get("commitSha") or os.environ.get("GITHUB_SHA", "")
+                  if sha:
+                      cmd.append(f"commitSha={sha}")
               else:
-                  payload["error"] = entry.get("reason") or "publish failed"
-              body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-              secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-              sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-              req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-              req.add_header("content-type", "application/json")
-              req.add_header("x-deadzone-signature", sig)
-              try:
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      resp.read()
-              except Exception as exc:
-                  print(f"warning: {payload_type} callback failed for {repo}:", exc)
+                  cmd.append(f"error={entry.get('reason') or 'publish failed'}")
+              subprocess.run(cmd, check=False)
           PY
 
       - name: "Report terminal failure (catch-all)"
         if: failure()
         shell: bash
+        env:
+          DEADZONE_REQUEST_ID: ${{ inputs.job_id }}
         run: |
           set -Eeuo pipefail
-          if [[ -z "${DEADZONE_CALLBACK_SECRET:-}" ]]; then
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" ]]; then
             echo "warning: callback secret not yet loaded; cannot emit terminal analyze.failed"
             exit 0
           fi
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "analyze.failed",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
-              "profileId": os.environ["DEADZONE_PROFILE_ID"],
-              "target": os.environ["DEADZONE_TARGET_REPO"],
-              "stage": "analyze",
-              "error": "workflow failed before completion",
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: terminal analyze.failed callback failed:", exc)
-          PY
+          # Use the same terminal reporter Lite uses so the bot gets a
+          # payload signed with the canonical runtime contract.
+          python3 runtime/report_build_event.py failed \
+            --project super \
+            --message "DeadZone Super Inspector run failed before completion."
+
+      - name: "Report cancellation"
+        if: cancelled()
+        shell: bash
+        env:
+          DEADZONE_REQUEST_ID: ${{ inputs.job_id }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" && -s runtime/build.env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source runtime/build.env
+            set +a
+            export DEADZONE_EVENT_SECRET="${BUILD_PROGRESS_SECRET:-}"
+          fi
+          if [[ -z "${DEADZONE_EVENT_SECRET:-}" ]]; then
+            echo "warning: callback secret not yet loaded; cannot emit cancellation event"
+            exit 0
+          fi
+          python3 runtime/report_build_event.py cancelled \
+            --project super \
+            --message "DeadZone Super Inspector run cancelled."
 
       - name: "Cleanup temporary ROM + logs"
         if: always()
@@ -1018,30 +937,3 @@ jobs:
           path: ${{ steps.workspace.outputs.ROOT }}/logs/
           if-no-files-found: warn
           retention-days: 14
-
-      - name: "Report cancellation"
-        if: cancelled()
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.request
-          payload = {
-              "type": "analyze.cancelled",
-              "jobId": os.environ["DEADZONE_JOB_ID"],
-              "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
-              "profileId": os.environ["DEADZONE_PROFILE_ID"],
-              "target": os.environ["DEADZONE_TARGET_REPO"],
-          }
-          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
-          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
-          req.add_header("content-type", "application/json")
-          req.add_header("x-deadzone-signature", sig)
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  resp.read()
-          except Exception as exc:
-              print("warning: analyze.cancelled callback failed:", exc)
-          PY
