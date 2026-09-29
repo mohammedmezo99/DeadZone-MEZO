@@ -160,6 +160,7 @@ jobs:
           path: caller_repo
           fetch-depth: 1
           persist-credentials: false
+          clean: true
 
       - name: "Validate inputs"
         id: validate_inputs
@@ -307,11 +308,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p /tmp
-          cp "$RUNNER_TEMP/caller_repo/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
-          cp "$RUNNER_TEMP/caller_repo/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
+          cp "${{ github.workspace }}/caller_repo/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
+          cp "${{ github.workspace }}/caller_repo/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
           chmod +x /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
           python3 -m py_compile /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
-          printf 'CALLER_REPO_DIR=%s\n' "$RUNNER_TEMP/caller_repo" >> "$GITHUB_ENV"
+          printf 'CALLER_REPO_DIR=%s\n' "${{ github.workspace }}/caller_repo" >> "$GITHUB_ENV"
           echo "helpers ready"
 
       - name: "Report setup.started"
