@@ -42,7 +42,8 @@ on:
         description: "Hard cap for ROM download"
         required: false
         type: string
-        default: "4294967296"
+        default: "12884901888"   # 12 GiB - matches the real size of Xiaomi
+                                  # Fastboot ROMs that exceed the old 4 GiB cap.
 
 permissions:
   # The reusable workflow superinspector-core.yml declares

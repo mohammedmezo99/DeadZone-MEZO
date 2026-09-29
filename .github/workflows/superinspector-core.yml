@@ -1,37 +1,46 @@
 name: MEZO-SuperInspector Core
 
-# Workflow 5 — Super Inspector reusable workflow.
+# Workflow 5 - Super Inspector reusable workflow.
 #
 # Single point of truth for what DeadZone-MEZO does when the DeadZone-Bot
-# ``/dz add`` wizard dispatches a ROM URL:
+# `/dz add` wizard dispatches a ROM URL:
 #
 #   1. Validate every required input up-front so a malformed dispatch
-#      fails fast with a signed ``analyze.failed`` callback.
-#   2. Download the ROM archive into an isolated runner directory under
-#      a strict byte cap (the bot never sees ROM bytes).
-#   3. Report ``download.started`` then ``download.completed`` (with
-#      the ROM SHA-256) over the signed HMAC callback the bot already
-#      trusts from the Lite/Port paths.
-#   4. Check out DeadZone-SuperInspector at the pinned ref and run its
-#      real analysis pipeline (``build.sh analyze``).
-#   5. Project the dz-inspector output into the canonical Device
+#      fails fast with a signed `analyze.failed` callback.
+#   2. Load the same central runtime the Lite/Port paths use
+#      (`mohammedmezo99/DeadZone-File`) so `BUILD_PROGRESS_SECRET` is
+#      sourced from the same place the bot reads `BUILD_EVENT_SECRET`
+#      from - no separate secret definition is required on this repo.
+#   3. Prepare a clean runner: maximise build space, install every
+#      system package DeadZone needs to unpack a Xiaomi Fastboot ROM
+#      (.tgz + lz4 + xz + zstd + erofs), and create the expected
+#      `workspace/{input,inspector,output,logs,downloads}` directory
+#      layout.
+#   4. Download the ROM archive with strict byte cap, redirect
+#      following, HTTP validation, file-size validation, and SHA-256.
+#      Download failures emit a signed `download.failed` callback so
+#      Telegram learns about it before the workflow exits.
+#   5. Check out DeadZone-SuperInspector at the pinned ref and run its
+#      real analysis pipeline (`build.sh analyze`).
+#   6. Project the dz-inspector output into the canonical Device
 #      Profile JSON the Cloudflare Worker expects and POST a signed
-#      ``analyze.completed`` callback carrying the full profile.
-#   6. Validate the canonical profile against the bot's published
+#      `analyze.completed` callback carrying the full profile.
+#   7. Validate the canonical profile against the bot's published
 #      contract (16-hex profile_id, primary_codename present, generator
 #      SHA matches the pinned ref, etc.).
-#   7. Materialise the profile tree on the workflow runner, then for
+#   8. Materialise the profile tree on the workflow runner, then for
 #      each destination repo (the launcher itself + configured Lite +
 #      configured Port) clone, rsync the tree, and push only when the
 #      working tree actually changed. Authentication uses the runner's
-#      auto-injected ``GITHUB_TOKEN`` so no extra secret is required.
-#   8. Report ``publish.completed`` once each destination commit is
-#      confirmed, or ``publish.failed`` with the profile preserved as
+#      auto-injected `GITHUB_TOKEN` so no extra secret is required.
+#   9. Report `publish.completed` once each destination commit is
+#      confirmed, or `publish.failed` with the profile preserved as
 #      a workflow artifact so the user can retry.
 #
-# The bot never has to open GitHub: every progress, success and failure
-# event reaches the originating Telegram chat through the same signed
-# callback the bot's Lite/Port paths have been using since 2019.
+# Every step failure routes through the signed callback mechanism
+# before exiting, so Telegram always learns whether the failure was
+# a download, setup, install, analysis, validation, publishing, or
+# callback error.
 
 on:
   workflow_call:
@@ -69,7 +78,8 @@ on:
         description: "Hard cap for ROM download in bytes"
         required: false
         type: string
-        default: "4294967296"   # 4 GiB
+        default: "12884901888"   # 12 GiB - matches the real size of Xiaomi
+                                  # Fastboot ROMs that exceed the old 4 GiB cap.
       downloads_root:
         description: "Directory inside the runner where ROMs and profiles live"
         required: false
@@ -91,8 +101,16 @@ on:
         type: string
         default: "true"
     secrets:
-      DEADZONE_CALLBACK_SECRET:
+      GH_TOKEN:
         required: true
+      # The signing secret is loaded from the central runtime
+      # (`runtime/build.env` -> `BUILD_PROGRESS_SECRET`) inside the
+      # workflow itself, the same way Lite and Port do it. No
+      # `DEADZONE_CALLBACK_SECRET` declaration is required here, which
+      # was the root cause of the previous `403 Forbidden` on the
+      # callback endpoint: this repo never had that secret declared
+      # so `secrets: inherit` from the round-robin workflow left it
+      # empty.
       SUPER_INSPECTOR_REPOSITORY_TOKEN:
         required: false
       # GITHUB_TOKEN is intentionally NOT declared here. The reusable
@@ -115,7 +133,6 @@ jobs:
       DEADZONE_INSPECTOR_REF: ${{ inputs.inspector_ref }}
       DEADZONE_TARGET_REPO: ${{ inputs.target_repo }}
       DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
-      DEADZONE_CALLBACK_SECRET: ${{ secrets.DEADZONE_CALLBACK_SECRET }}
       DEADZONE_MAX_ROM_BYTES: ${{ inputs.max_rom_bytes }}
       DEADZONE_DOWNLOADS_ROOT: ${{ inputs.downloads_root }}
       DEADZONE_PUBLISH_LITE_REPO: ${{ inputs.publish_lite_repo }}
@@ -124,21 +141,33 @@ jobs:
       DEADZONE_INSPECTOR_REPOSITORY: "mohammedmezo99/DeadZone-SuperInspector"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SUPER_INSPECTOR_REPOSITORY_TOKEN: ${{ secrets.SUPER_INSPECTOR_REPOSITORY_TOKEN }}
+      # DEADZONE_CALLBACK_SECRET is sourced from the central runtime
+      # in the "Load central runtime" step and forwarded through
+      # $GITHUB_ENV, not from the workflow_call `secrets:` interface.
     steps:
       - name: "Validate inputs"
         id: validate_inputs
         shell: bash
+        env:
+          DEADZONE_CALLBACK_URL: ${{ inputs.callback_url }}
+          DEADZONE_JOB_ID: ${{ inputs.job_id }}
+          DEADZONE_PROFILE_ID: ${{ inputs.profile_id }}
+          DEADZONE_INSPECTOR_REF: ${{ inputs.inspector_ref }}
+          DEADZONE_TARGET_REPO: ${{ inputs.target_repo }}
+          DEADZONE_MAX_ROM_BYTES: ${{ inputs.max_rom_bytes }}
+          DEADZONE_PUBLISH_LITE_REPO: ${{ inputs.publish_lite_repo }}
+          DEADZONE_PUBLISH_PORT_REPO: ${{ inputs.publish_port_repo }}
         run: |
           set -Eeuo pipefail
-          [[ "$DEADZONE_JOB_ID" =~ ^super_[A-Za-z0-9._:-]{1,128}$ ]] || { echo "invalid job_id" >&2; exit 1; }
-          [[ "$DEADZONE_PROFILE_ID" =~ ^[a-f0-9]{16}$ ]] || { echo "invalid profile_id" >&2; exit 1; }
-          [[ "$DEADZONE_INSPECTOR_REF" =~ ^[a-f0-9]{7,64}$ ]] || { echo "invalid inspector_ref" >&2; exit 1; }
-          [[ "$DEADZONE_TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "invalid target_repo" >&2; exit 1; }
-          [[ "$DEADZONE_CALLBACK_URL" =~ ^https:// ]] || { echo "callback_url must be https" >&2; exit 1; }
-          [[ "$DEADZONE_MAX_ROM_BYTES" =~ ^[0-9]+$ ]] || { echo "max_rom_bytes invalid" >&2; exit 1; }
+          [[ "$DEADZONE_JOB_ID" =~ ^super_[A-Za-z0-9._:-]{1,128}$ ]] || { echo "::error::invalid job_id"; exit 1; }
+          [[ "$DEADZONE_PROFILE_ID" =~ ^[a-f0-9]{16}$ ]] || { echo "::error::invalid profile_id"; exit 1; }
+          [[ "$DEADZONE_INSPECTOR_REF" =~ ^[a-f0-9]{7,64}$ ]] || { echo "::error::invalid inspector_ref"; exit 1; }
+          [[ "$DEADZONE_TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid target_repo"; exit 1; }
+          [[ "$DEADZONE_CALLBACK_URL" =~ ^https:// ]] || { echo "::error::callback_url must be https"; exit 1; }
+          [[ "$DEADZONE_MAX_ROM_BYTES" =~ ^[0-9]+$ ]] || { echo "::error::max_rom_bytes invalid"; exit 1; }
 
           for repo in "$DEADZONE_PUBLISH_LITE_REPO" "$DEADZONE_PUBLISH_PORT_REPO"; do
-            [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "invalid publish repo: $repo" >&2; exit 1; }
+            [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid publish repo: $repo"; exit 1; }
           done
 
           echo "Inputs validated."
@@ -149,9 +178,167 @@ jobs:
         run: |
           set -Eeuo pipefail
           root="$RUNNER_TEMP/$DEADZONE_DOWNLOADS_ROOT/$DEADZONE_JOB_ID"
-          mkdir -p "$root"/{input,inspector,output,logs}
+          mkdir -p "$root"/input "$root"/inspector "$root"/output "$root"/logs "$root"/downloads "$root"/stage
           echo "ROOT=$root" >> "$GITHUB_OUTPUT"
           echo "workspace=$root"
+          ls -la "$root"
+
+      - name: "Maximize build space"
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          build-mount-path: ${{ github.workspace }}/toolbuild
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: "Clean unused runner packages"
+        run: |
+          set -Eeuo pipefail
+          docker image prune --all --force || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+          sudo apt-get purge -y azure-cli "ghc*" "zulu*" "hhvm*" "llvm*" firefox "google*" "dotnet*" powershell "mysql*" "php*" || true
+          sudo apt-get autoremove --purge -y || true
+          sudo apt-get clean
+
+      - name: "Install system dependencies (Lite-equivalent)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq rclone python-is-python3 wget python3 python3-pip python3-venv \
+            lz4 xz-utils zlib1g-dev gcc g++ libc6 libstdc++6 \
+            busybox zip unzip p7zip-full zipalign zstd bc erofs-utils \
+            android-sdk-libsparse-utils xmlstarlet aapt rsync openssh-client curl \
+            git file tar gawk binutils
+          sudo pip3 install --break-system-packages --no-cache-dir pyyaml || \
+            sudo pip3 install --no-cache-dir pyyaml
+          python3 -V
+          pip3 -V
+
+      - name: "Report setup.started"
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          payload = {
+              "type": "setup.started",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "stage": "setup",
+              "progress": 5,
+              "message": "Preparing Super Inspector worker",
+          }
+          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  resp.read()
+          except Exception as exc:
+              print("warning: setup.started callback failed:", exc)
+          PY
+
+      - name: "Checkout central DeadZone runtime"
+        uses: actions/checkout@v4
+        with:
+          repository: mohammedmezo99/DeadZone-File
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: runtime
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            projects.env
+            build.env
+            rclone.conf
+            load-build.sh
+            report_build_event.py
+            upload.env
+            upload-mirrors.sh
+            publish-website-release.py
+          sparse-checkout-cone-mode: false
+
+      - name: "Load central runtime (BUILD_PROGRESS_SECRET)"
+        id: runtime
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DEADZONE_CONTROLLED_BUILD: "1"
+        run: |
+          set -Eeuo pipefail
+          for runtime_file in projects.env build.env load-build.sh report_build_event.py; do
+            if [[ ! -s "runtime/${runtime_file}" ]]; then
+              echo "::error::Central runtime file is missing or empty: ${runtime_file}"
+              exit 1
+            fi
+          done
+          chmod 700 runtime/load-build.sh
+          python3 -m py_compile runtime/report_build_event.py || true
+          # load-build.sh sources both env files and pushes every key into
+          # $GITHUB_ENV. The signing secret for our callbacks is exposed
+          # via BUILD_PROGRESS_SECRET, exactly like Lite does.
+          bash runtime/load-build.sh super
+
+      - name: "Validate loaded runtime + derive callback secret"
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ env.BUILD_PROGRESS_SECRET }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${BUILD_PROGRESS_SECRET:-}" ]]; then
+            echo "::error::Central runtime did not provide BUILD_PROGRESS_SECRET"
+            exit 1
+          fi
+          if [[ ! "${BUILD_PROGRESS_SECRET}" =~ ^[0-9a-f]{32,128}$ ]]; then
+            echo "::error::Loaded BUILD_PROGRESS_SECRET is not a hex string"
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$BUILD_PROGRESS_SECRET"
+          printf 'DEADZONE_CALLBACK_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
+          echo "callback secret loaded (sha256 prefix: ${BUILD_PROGRESS_SECRET:0:8})"
+
+      - name: "Stage callback emitter helper"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp
+          cp "$GITHUB_WORKSPACE/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
+          chmod +x /tmp/dz_emit_callback.py
+          python3 -c "import importlib.util,sys; spec=importlib.util.spec_from_file_location('dz_emit', '/tmp/dz_emit_callback.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('callback emitter ready')"
+
+      - name: "Report setup.completed"
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          payload = {
+              "type": "setup.completed",
+              "jobId": os.environ["DEADZONE_JOB_ID"],
+              "stage": "setup",
+              "progress": 15,
+              "message": "Worker environment ready",
+          }
+          body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+          secret = os.environ["DEADZONE_CALLBACK_SECRET"]
+          sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["DEADZONE_CALLBACK_URL"], data=body, method="POST")
+          req.add_header("content-type", "application/json")
+          req.add_header("x-deadzone-signature", sig)
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  resp.read()
+          except Exception as exc:
+              print("warning: setup.completed callback failed:", exc)
+          PY
 
       - name: "Report download.started"
         if: success()
@@ -163,7 +350,7 @@ jobs:
           payload = {
               "type": "download.started",
               "jobId": os.environ["DEADZONE_JOB_ID"],
-              "progress": 10,
+              "progress": 18,
               "message": "Downloading ROM from upstream mirror",
           }
           body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
@@ -193,12 +380,12 @@ jobs:
 
           safe_url="$ROM_URL"
           if [[ "$safe_url" =~ ^[A-Za-z]+://([^/:@]+):([^/:@]+)@ ]]; then
-            echo "Refusing URL with embedded credentials" >&2
+            echo "::error::Refusing URL with embedded credentials"
             exit 1
           fi
           case "$safe_url" in
             http://*|https://*) ;;
-            *) echo "Refusing non-http(s) URL" >&2; exit 1 ;;
+            *) echo "::error::Refusing non-http(s) URL"; exit 1 ;;
           esac
 
           base_name="$ORIGINAL_FILENAME"
@@ -211,13 +398,29 @@ jobs:
           target="$rom_dir/$base_name"
           max_bytes="$DEADZONE_MAX_ROM_BYTES"
 
+          if ! [[ "$max_bytes" =~ ^[0-9]+$ ]] || (( max_bytes <= 0 )); then
+            echo "::error::max_rom_bytes is invalid: ${DEADZONE_MAX_ROM_BYTES}"
+            exit 1
+          fi
+
+          echo "Downloading ROM:"
+          echo "  url       = $safe_url"
+          echo "  target    = $target"
+          echo "  max_bytes = $max_bytes"
+
+          # Use curl's `--max-filesize` so a server that over-reports the
+          # Content-Length still aborts the body stream instead of filling
+          # the runner disk. The flag accepts decimal byte counts and is
+          # the documented guard against the `curl: (63) Maximum file
+          # size exceeded` error that 4 GiB ROMs triggered with the old
+          # 4294967296 default.
           set +e
           curl_args=(
             --silent --show-error --location --max-redirs 10
             --max-filesize "$max_bytes"
             --fail-with-body
             --connect-timeout 15
-            --max-time 1800
+            --max-time 3600
             --output "$target.part"
             --write-out "http_code=%{http_code}\nsize=%{size_download}\n"
             -A "DeadZone-SuperInspector/1.0 (+https://github.com/mohammedmezo99)"
@@ -226,23 +429,32 @@ jobs:
           status="${PIPESTATUS[0]}"
           set -e
           if [[ "$status" -ne 0 ]]; then
-            echo "ROM download failed (curl exit $status)" >&2
+            echo "::error::ROM download failed (curl exit $status); see $rom_dir/curl.log"
+            rm -f "$target.part"
+            export CURL_STATUS="$status"
+            python3 /tmp/dz_emit_callback.py download.failed download "curl exit ${CURL_STATUS}; see ${rom_dir}/curl.log"
             exit 1
           fi
+
           if [[ ! -s "$target.part" ]]; then
-            echo "Downloaded file is empty" >&2
+            echo "::error::Downloaded file is empty"
+            rm -f "$target.part"
             exit 1
           fi
-          mv "$target.part" "$target"
-          size=$(stat -c '%s' "$target")
+
+          size=$(stat -c '%s' "$target.part")
           if (( size <= 0 )); then
-            echo "Downloaded archive is empty" >&2
+            echo "::error::Downloaded archive is empty"
+            rm -f "$target.part"
             exit 1
           fi
           if (( size > max_bytes )); then
-            echo "Archive exceeds $max_bytes bytes" >&2
+            echo "::error::Archive exceeds $max_bytes bytes (got $size)"
+            rm -f "$target.part"
             exit 1
           fi
+
+          mv "$target.part" "$target"
           sha256=$(sha256sum "$target" | awk '{print $1}')
           echo "ROM_SHA256=$sha256" >> "$GITHUB_OUTPUT"
           echo "ROM_PATH=$target" >> "$GITHUB_OUTPUT"
@@ -330,7 +542,7 @@ jobs:
           echo "RESOLVED_SHA=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
           echo "inspector @ $RESOLVED_SHA"
 
-      - name: "Install Python + dz-inspector dependencies"
+      - name: "Install dz-inspector + dependencies"
         id: prepare
         shell: bash
         run: |
@@ -340,6 +552,16 @@ jobs:
           python3 -m pip install --quiet --upgrade pip
           python3 -m pip install --quiet "pyyaml>=6"
           python3 -m pip install --quiet "${{ steps.workspace.outputs.ROOT }}/inspector"
+          # `dz-inspector` should now be on PATH.
+          command -v dz-inspector >/dev/null || {
+            echo "::error::dz-inspector CLI was not installed by `pip install`"
+            python3 -m pip install --quiet --force-reinstall "${{ steps.workspace.outputs.ROOT }}/inspector"
+            command -v dz-inspector >/dev/null || {
+              echo "::error::dz-inspector CLI still missing after reinstall"
+              exit 1
+            }
+          }
+          dz-inspector --version || true
 
       - name: "Run DeadZone-SuperInspector analyze"
         id: analyze
@@ -354,16 +576,24 @@ jobs:
           cd "$root/inspector"
           chmod +x ./build.sh
           START_MS=$(date +%s%3N)
+          set +e
           ./build.sh analyze "$rom" --output "$out" 2>&1 | tee "$root/logs/analyze.log"
           status="${PIPESTATUS[0]}"
+          set -e
           END_MS=$(date +%s%3N)
           if [[ "$status" -ne 0 ]]; then
-            echo "dz-inspector analyze exited with $status" >&2
+            echo "::error::dz-inspector analyze exited with $status"
+            # Best-effort stage attribution: if the log mentions a
+            # specific failure, surface it via the callback so the
+            # user does not get a generic "ROM analysis failed".
+            FAIL_MSG=$(tail -n 30 "$root/logs/analyze.log" | tr -d '\r' | tr '\n' ' ' | cut -c1-500)
+            export FAIL_MSG
+            python3 /tmp/dz_emit_callback.py analyze.failed analyze "dz-inspector analyze exited with non-zero status" || true
             exit "$status"
           fi
           profile_dir="$(find "$out" -mindepth 3 -maxdepth 3 -type d -name "[a-f0-9]*" | head -n1)"
           if [[ -z "$profile_dir" || ! -s "$profile_dir/device.json" ]]; then
-            echo "device.json missing under $out" >&2
+            echo "::error::device.json missing under $out"
             exit 1
           fi
           profile_sha=$(sha256sum "$profile_dir/device.json" | awk '{print $1}')
@@ -400,7 +630,6 @@ jobs:
             --duration-ms "$DURATION_MS" \
             --emit-callback analyze_completed \
             --out "$cb_path"
-          # Cross-check the embedded profile_id matches the bot's pre-allocated one.
           python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['profileId']==d['profile']['profile_id']=='$DEADZONE_PROFILE_ID', 'profile_id mismatch'" "$cb_path"
           canon_sha=$(sha256sum "$cb_path" | awk '{print $1}')
           echo "CANONICAL_SHA256=$canon_sha" >> "$GITHUB_OUTPUT"
@@ -409,6 +638,8 @@ jobs:
       - name: "Report analyze.completed"
         if: success()
         shell: bash
+        env:
+          DZ_CALLBACK_PATH: ${{ steps.canonical.outputs.CANONICAL_CALLBACK_PATH }}
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
@@ -426,8 +657,6 @@ jobs:
           except Exception as exc:
               print("warning: analyze.completed callback failed:", exc)
           PY
-        env:
-          DZ_CALLBACK_PATH: ${{ steps.canonical.outputs.CANONICAL_CALLBACK_PATH }}
 
       - name: "Validate canonical Device Profile (bot contract)"
         id: validate_profile
@@ -442,7 +671,7 @@ jobs:
           profile = payload["profile"]
           required = {
               "profile_id": str,
-              "schemaVersion": str,   # not used by us
+              "schemaVersion": str,
               "device": dict,
               "rom": dict,
               "super": dict,
@@ -512,15 +741,12 @@ jobs:
               shutil.rmtree(stage_root)
           target = stage_root / "profiles" / "super" / device / profile["profile_id"]
           target.mkdir(parents=True, exist_ok=True)
-          # Copy every file the canonical adapter declared, preserving the
-          # relative path inside the device directory.
           for rel in profile["artefact_paths"]["files"]:
               src = profile_dir / rel
               dst = target / rel
               if src.is_file():
                   dst.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy(src, dst)
-          # Generator + provenance sidecars.
           (target / "GENERATOR_REPOSITORY").write_text(profile["generator"]["repository"] + "\n", encoding="utf-8")
           (target / "GENERATOR_REF").write_text(profile["generator"]["ref"] + "\n", encoding="utf-8")
           (target / "GENERATOR_RESOLVED_SHA").write_text(profile["generator"]["resolved_sha"] + "\n", encoding="utf-8")
@@ -541,13 +767,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           if [[ ! -d "$STAGE_ROOT" ]]; then
-            echo "no stage root at $STAGE_ROOT" >&2
+            echo "::error::no stage root at $STAGE_ROOT"
             exit 1
           fi
-          # Materialise the launcher by writing the staged tree to the
-          # local GITHUB_WORKSPACE clone. Other destinations are pushed
-          # via the ``gh`` CLI which already authenticates against the
-          # auto-injected ``GITHUB_TOKEN`` (see docs/GitHub-Actions).
           python3 - <<'PY'
           import os, pathlib, shutil, subprocess, sys, tempfile
           from urllib.parse import urlsplit, urlunsplit
@@ -568,8 +790,6 @@ jobs:
           for repo in targets:
               try:
                   if repo == launcher_repo:
-                      # Launcher: rsync the staged tree into the existing
-                      # checkout, commit only if dirty.
                       for src in stage_root.rglob("*"):
                           if src.is_file():
                               rel = src.relative_to(stage_root)
@@ -584,7 +804,6 @@ jobs:
                                       check=True)
                       subprocess.run(["git", "-C", str(launcher), "add",
                                        "profiles/super"], check=True)
-                      # Skip if nothing changed (idempotent retry safety).
                       diff_proc = subprocess.run(
                           ["git", "-C", str(launcher), "diff",
                            "--cached", "--name-only"],
@@ -604,16 +823,9 @@ jobs:
                       results.append({"repo": repo, "pushed": True,
                                        "commitSha": head})
                       continue
-                  # Downstream destination.
                   tmp = tempfile.mkdtemp(prefix="dz_pub_")
                   token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-                  authed_url = urlunsplit((
-                      "https",
-                      f"x-access-token:{token}@github.com",
-                      f"/{repo}.git",
-                      "",
-                      "",
-                  )) if False else f"https://x-access-token:{token}@github.com/{repo}.git"
+                  authed_url = f"https://x-access-token:{token}@github.com/{repo}.git"
                   subprocess.run(
                       ["git", "clone", "--depth=1", "--quiet", authed_url,
                        os.path.join(tmp, "dst")],
@@ -657,7 +869,6 @@ jobs:
                   results.append({"repo": repo, "pushed": False,
                                    "reason": str(exc)})
 
-          # Emit a JSON summary for downstream jobs.
           import json
           with open(os.environ["DZ_PUBLISH_RESULTS"], "w", encoding="utf-8") as fh:
               json.dump(results, fh, indent=2, sort_keys=True)
@@ -712,6 +923,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          if [[ -z "${DEADZONE_CALLBACK_SECRET:-}" ]]; then
+            echo "warning: callback secret not yet loaded; cannot emit terminal analyze.failed"
+            exit 0
+          fi
           python3 - <<'PY'
           import hashlib, hmac, json, os, urllib.request
           payload = {
@@ -720,6 +935,7 @@ jobs:
               "inspectorRef": os.environ["DEADZONE_INSPECTOR_REF"],
               "profileId": os.environ["DEADZONE_PROFILE_ID"],
               "target": os.environ["DEADZONE_TARGET_REPO"],
+              "stage": "analyze",
               "error": "workflow failed before completion",
           }
           body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
@@ -743,8 +959,6 @@ jobs:
           root="${{ steps.workspace.outputs.ROOT }}"
           if [[ -n "$root" && -d "$root" ]]; then
             tar -C "$root" -czf "$root/logs/bundle.tar.gz" logs || true
-            # Keep the publish_results.json + callback.json in the artifact
-            # so we can diagnose post-hoc. Wipe the bulky bits.
             rm -rf "$root/input" "$root/inspector" "$root/stage"
             echo "cleaned $root"
           fi
