@@ -152,12 +152,17 @@ jobs:
       # makes the callback contract byte-identical to the runtime's
       # report_build_event.py signer.
     steps:
-      - name: "Checkout caller repository (provides dz_emit_callback.py + dz_validate_rom.py)"
+      # NOTE: callers are not required to provide dz_emit_callback.py
+      # or dz_validate_rom.py. DeadZone-MEZO ships self-contained copies
+      # in .github/scripts/ so the worker runs on a clean runner without
+      # needing a separate caller repo checkout.
+
+      - name: "Checkout launcher repository (for publish step)"
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.target_repo }}
           ref: ${{ github.event.repository.default_branch }}
-          path: caller_repo
+          path: launcher_repo
           fetch-depth: 1
           persist-credentials: false
           clean: true
@@ -311,17 +316,55 @@ jobs:
           printf 'DEADZONE_CALLBACK_SECRET=%s\n' "$BUILD_PROGRESS_SECRET" >> "$GITHUB_ENV"
           echo "callback secret loaded (sha256 prefix: ${BUILD_PROGRESS_SECRET:0:8})"
 
-      - name: "Stage callback emitter + validator helpers"
+      - name: "Stage callback emitter + validator helpers (self-contained)"
         shell: bash
+        env:
+          # Hardcoded so the reusable workflow always knows where to
+          # fetch its own files from, even when invoked via the
+          # workflow_dispatch API (where the caller's repo is the
+          # one in github.workspace, not DeadZone-MEZO).
+          DEADZONE_MEZO_REPO: "mohammedmezo99/DeadZone-MEZO"
+          DEADZONE_MEZO_REF: "main"
         run: |
           set -Eeuo pipefail
+          # The reusable workflow lives in this repo. Check it out so
+          # .github/scripts/ is always available regardless of how the
+          # reusable workflow was triggered (local `uses:` or remote
+          # workflow_dispatch / API). The default workflow_call
+          # workspace is the *caller's* repo, so we explicitly fetch
+          # this repo to guarantee the helpers and deadzone_mezo
+          # library are on disk.
+          repo_root="${DEADZONE_REPO_ROOT:-/tmp/deadzone_mezo_self}"
+          if [[ ! -s "$repo_root/.github/scripts/dz_emit_callback.py" ]]; then
+            echo "fetching ${DEADZONE_MEZO_REPO}@${DEADZONE_MEZO_REF} into $repo_root"
+            rm -rf "$repo_root"
+            git clone --depth=1 --quiet --branch "${DEADZONE_MEZO_REF}" \
+              "https://github.com/${DEADZONE_MEZO_REPO}.git" "$repo_root"
+          fi
+          if [[ ! -s "$repo_root/.github/scripts/dz_emit_callback.py" ]]; then
+            echo "::error::missing self-contained dz_emit_callback.py in $repo_root/.github/scripts/"
+            exit 1
+          fi
+          if [[ ! -s "$repo_root/.github/scripts/dz_validate_rom.py" ]]; then
+            echo "::error::missing self-contained dz_validate_rom.py in $repo_root/.github/scripts/"
+            exit 1
+          fi
+          if [[ ! -s "$repo_root/.github/scripts/lib/deadzone_mezo.py" ]]; then
+            echo "::error::missing self-contained lib/deadzone_mezo.py in $repo_root/.github/scripts/lib/"
+            exit 1
+          fi
           mkdir -p /tmp
-          cp "${{ github.workspace }}/caller_repo/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
-          cp "${{ github.workspace }}/caller_repo/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
+          cp "$repo_root/.github/scripts/dz_emit_callback.py" /tmp/dz_emit_callback.py
+          cp "$repo_root/.github/scripts/dz_validate_rom.py" /tmp/dz_validate_rom.py
           chmod +x /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
           python3 -m py_compile /tmp/dz_emit_callback.py /tmp/dz_validate_rom.py
-          printf 'CALLER_REPO_DIR=%s\n' "${{ github.workspace }}/caller_repo" >> "$GITHUB_ENV"
-          echo "helpers ready"
+          # Expose the repo root for downstream steps that need to
+          # call the deadzone_mezo library / e2e_real_rom driver.
+          # CALLER_REPO_DIR points at the launcher (target_repo)
+          # checkout — the publish step needs that to push profiles.
+          printf 'DEADZONE_REPO_ROOT=%s\n' "$repo_root" >> "$GITHUB_ENV"
+          printf 'CALLER_REPO_DIR=%s\n' "${{ github.workspace }}/launcher_repo" >> "$GITHUB_ENV"
+          echo "self-contained helpers staged from $repo_root/.github/scripts/"
 
       - name: "Report setup.started"
         if: success()
@@ -602,6 +645,53 @@ jobs:
           echo "DURATION_MS=$((END_MS - START_MS))" >> "$GITHUB_OUTPUT"
           echo "analyze OK in $((END_MS - START_MS)) ms"
 
+      - name: "Run self-contained deadzone_mezo pipeline (Lite-equivalent extraction)"
+        id: mezo_pipeline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="${{ steps.workspace.outputs.ROOT }}"
+          rom="${{ steps.download.outputs.ROM_PATH }}"
+          out="$root/mezo_output"
+          rm -rf "$out"
+          mkdir -p "$out"
+          repo_root="${DEADZONE_REPO_ROOT:-${GITHUB_WORKSPACE:-$(pwd)}}"
+          if [[ ! -s "$repo_root/.github/scripts/e2e_real_rom.py" ]]; then
+            echo "::error::self-contained e2e_real_rom.py missing in $repo_root/.github/scripts/"
+            exit 1
+          fi
+          if [[ ! -s "$repo_root/.github/scripts/lib/deadzone_mezo.py" ]]; then
+            echo "::error::self-contained lib/deadzone_mezo.py missing in $repo_root/.github/scripts/lib/"
+            exit 1
+          fi
+          echo "running self-contained deadzone_mezo pipeline against $rom"
+          START_MS=$(date +%s%3N)
+          set +e
+          python3 "$repo_root/.github/scripts/e2e_real_rom.py" \
+            --url "$rom" \
+            --rom-path "$rom" \
+            --output "$out" \
+            --max-bytes "$DEADZONE_MAX_ROM_BYTES" \
+            --json 2>&1 | tee "$root/logs/mezo_pipeline.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          END_MS=$(date +%s%3N)
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::deadzone_mezo pipeline exited with $status"
+            python3 /tmp/dz_emit_callback.py analyze.failed analyze "deadzone_mezo pipeline exited with $status" || true
+            exit "$status"
+          fi
+          profile_path="$out/device.profile.json"
+          if [[ ! -s "$profile_path" ]]; then
+            echo "::error::deadzone_mezo did not write profile.json to $out"
+            exit 1
+          fi
+          profile_sha=$(sha256sum "$profile_path" | awk '{print $1}')
+          echo "MEZO_PROFILE_PATH=$profile_path" >> "$GITHUB_OUTPUT"
+          echo "MEZO_PROFILE_SHA256=$profile_sha" >> "$GITHUB_OUTPUT"
+          echo "MEZO_DURATION_MS=$((END_MS - START_MS))" >> "$GITHUB_OUTPUT"
+          echo "deadzone_mezo pipeline OK in $((END_MS - START_MS)) ms"
+
       - name: "Build canonical Device Profile + analyze.completed payload"
         id: canonical
         env:
@@ -638,6 +728,26 @@ jobs:
           canon_sha=$(sha256sum "$cb_path" | awk '{print $1}')
           echo "CANONICAL_SHA256=$canon_sha" >> "$GITHUB_OUTPUT"
           echo "CANONICAL_CALLBACK_PATH=$cb_path" >> "$GITHUB_OUTPUT"
+
+      - name: "Cross-validate deadzone_mezo profile against canonical"
+        id: cross_validate
+        if: success()
+        shell: bash
+        env:
+          MEZO_PROFILE_PATH: ${{ steps.mezo_pipeline.outputs.MEZO_PROFILE_PATH }}
+          CANONICAL_CALLBACK_PATH: ${{ steps.canonical.outputs.CANONICAL_CALLBACK_PATH }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          mezo = json.load(open(os.environ["MEZO_PROFILE_PATH"], encoding="utf-8"))
+          canon = json.load(open(os.environ["CANONICAL_CALLBACK_PATH"], encoding="utf-8"))["profile"]
+          mezo_codename = mezo["device"]["primary_codename"]
+          canon_codename = canon["device"]["primary_codename"]
+          if mezo_codename != canon_codename:
+              raise SystemExit(f"codename mismatch: mezo={mezo_codename} canonical={canon_codename}")
+          print(f"cross-validate OK: codename={mezo_codename} agrees with canonical")
+          PY
 
       - name: "Report analyze.completed"
         if: success()

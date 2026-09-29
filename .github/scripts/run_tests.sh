@@ -28,6 +28,7 @@ run_suite "callback emitter unit tests" "$SCRIPT_DIR/test_dz_emit_callback.py"
 run_suite "ROM archive validator tests" "$SCRIPT_DIR/test_dz_validate_rom.py"
 run_suite "workflow ordering static checks" "$SCRIPT_DIR/test_workflow_ordering.py"
 run_suite "SuperInspector E2E pipeline" "$SCRIPT_DIR/test_superinspector_e2e.py"
+run_suite "deadzone_mezo library tests" "$SCRIPT_DIR/test_deadzone_mezo.py"
 
 if (( failed )); then
     echo "One or more test suites failed."
