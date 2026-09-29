@@ -1046,6 +1046,15 @@ jobs:
             --project super \
             --message "DeadZone Super Inspector run cancelled."
 
+      - name: "Upload job log bundle"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: superinspector-logs-${{ inputs.job_id }}
+          path: ${{ steps.workspace.outputs.ROOT }}/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: "Cleanup temporary ROM + logs"
         if: always()
         shell: bash
@@ -1066,12 +1075,3 @@ jobs:
             rm -rf "$root" || true
             echo "cleaned $root"
           fi
-
-      - name: "Upload job log bundle"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: superinspector-logs-${{ inputs.job_id }}
-          path: ${{ steps.workspace.outputs.ROOT }}/logs/
-          if-no-files-found: warn
-          retention-days: 14
